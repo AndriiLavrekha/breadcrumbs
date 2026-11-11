@@ -344,7 +344,8 @@ function mcpServerConfig(roots: string) {
     command: "npx",
     args: ["-y", PACKAGE_SPEC, "mcp"],
     env: {
-      PROJECT_PROGRESS_ROOTS: roots
+      PROJECT_PROGRESS_ROOTS: roots,
+      npm_config_allow_git: "all"
     }
   };
 }
@@ -397,6 +398,7 @@ startup_timeout_sec = 20
 
 [mcp_servers.${MCP_SERVER_NAME}.env]
 PROJECT_PROGRESS_ROOTS = "${roots.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"
+npm_config_allow_git = "all"
 ${CODEX_MCP_END}`;
 }
 
@@ -450,8 +452,26 @@ function parseHermesSkillList(output: string): Set<string> {
   return parseHermesFirstColumnList(output);
 }
 
+function parseHermesMcpServers(output: string): Map<string, { enabled: boolean }> {
+  const servers = new Map<string, { enabled: boolean }>();
+  for (const line of stripAnsi(output).split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (/^[\u2500-\u257F\s]+$/u.test(trimmed)) continue;
+
+    const boxTableCells = [...trimmed.matchAll(/│([^│]*)/g)].map((match) => match[1].trim()).filter(Boolean);
+    const firstColumn = boxTableCells[0] ?? trimmed.match(/^(\S+)/)?.[1];
+    if (!firstColumn) continue;
+    if (firstColumn.toLowerCase() === "name") continue;
+    const statusTarget = boxTableCells.length > 1 ? boxTableCells[boxTableCells.length - 1] : trimmed;
+    const disabled = /\bdisabled\s*$/i.test(statusTarget);
+    servers.set(firstColumn, { enabled: !disabled });
+  }
+  return servers;
+}
+
 function parseHermesMcpList(output: string): Set<string> {
-  return parseHermesFirstColumnList(output);
+  return new Set(parseHermesMcpServers(output).keys());
 }
 
 function formatHermesCommand(args: string[]): string {
@@ -549,6 +569,8 @@ export async function installAgent(options: InstallOptions = {}): Promise<Instal
         "npx",
         "--env",
         `PROJECT_PROGRESS_ROOTS=${roots}`,
+        "--env",
+        "npm_config_allow_git=all",
         "--args",
         "-y",
         PACKAGE_SPEC,
@@ -556,8 +578,20 @@ export async function installAgent(options: InstallOptions = {}): Promise<Instal
       ], { stdin: "y\n" });
 
       const updatedMcpList = await runHermesCommand(commandRunner, ["mcp", "list"]);
-      if (!parseHermesMcpList(updatedMcpList.stdout).has(HERMES_MCP_NAME)) {
+      const updatedServers = parseHermesMcpServers(updatedMcpList.stdout);
+      const addedServer = updatedServers.get(HERMES_MCP_NAME);
+      if (!addedServer) {
         throw new Error(`Hermes MCP server was not present after add: ${HERMES_MCP_NAME}`);
+      }
+      if (!addedServer.enabled) {
+        try {
+          await runHermesCommand(commandRunner, ["mcp", "remove", HERMES_MCP_NAME], { stdin: "y\n" });
+        } catch (cleanupError) {
+          throw new Error(
+            `Hermes MCP server was saved as disabled after add: ${HERMES_MCP_NAME}\nCleanup failed: ${asErrorMessage(cleanupError)}`
+          );
+        }
+        throw new Error(`Hermes MCP server was saved as disabled after add: ${HERMES_MCP_NAME}`);
       }
     } catch (error) {
       if (!options.mcpOnly) {
@@ -693,14 +727,15 @@ export async function readStatus(options: StatusOptions = {}): Promise<StatusRes
     const skillList = await runHermesCommand(commandRunner, ["skills", "list", "--source", "hub"]);
     const mcpList = await runHermesCommand(commandRunner, ["mcp", "list"]);
     const skills = parseHermesSkillList(skillList.stdout);
-    const servers = parseHermesMcpList(mcpList.stdout);
+    const servers = parseHermesMcpServers(mcpList.stdout);
     const skillName = !skills.has(HERMES_SKILL_NAME) && skills.has("project-progress") ? "project-progress" : HERMES_SKILL_NAME;
     const mcpName = !servers.has(HERMES_MCP_NAME) && servers.has(LEGACY_MCP_SERVER_NAME) ? LEGACY_MCP_SERVER_NAME : HERMES_MCP_NAME;
+    const serverState = servers.get(mcpName);
     return {
       agent,
       projectInitialized: await pathExists(projectProgress),
       bootstrapInstalled: false,
-      mcpConfigured: servers.has(mcpName),
+      mcpConfigured: Boolean(serverState?.enabled),
       skillInstalled: skills.has(skillName),
       files: {
         skill: `Hermes skill: ${skillName}`,
@@ -774,6 +809,7 @@ export async function runDoctor(options: StatusOptions = {}): Promise<DoctorResu
     let skillInstalled = false;
     let skillMessage = "Hermes skill is missing";
     let mcpConfigured = false;
+    let mcpDisabled = false;
     let mcpMessage = "Hermes MCP server is missing";
     let mcpName = HERMES_MCP_NAME;
 
@@ -789,10 +825,16 @@ export async function runDoctor(options: StatusOptions = {}): Promise<DoctorResu
 
       try {
         const mcpList = await runHermesCommand(commandRunner, ["mcp", "list"]);
-        const servers = parseHermesMcpList(mcpList.stdout);
+        const servers = parseHermesMcpServers(mcpList.stdout);
         if (!servers.has(mcpName) && servers.has(LEGACY_MCP_SERVER_NAME)) mcpName = LEGACY_MCP_SERVER_NAME;
-        mcpConfigured = servers.has(mcpName);
-        mcpMessage = mcpConfigured ? "Hermes MCP server is installed" : "Hermes MCP server is missing";
+        const serverState = servers.get(mcpName);
+        mcpDisabled = Boolean(serverState && !serverState.enabled);
+        mcpConfigured = Boolean(serverState?.enabled);
+        mcpMessage = mcpConfigured
+          ? "Hermes MCP server is installed"
+          : mcpDisabled
+            ? "Hermes MCP server is disabled"
+            : "Hermes MCP server is missing";
       } catch (error) {
         mcpMessage = asErrorMessage(error);
       }
@@ -804,7 +846,9 @@ export async function runDoctor(options: StatusOptions = {}): Promise<DoctorResu
     let mcpConnectionOk = false;
     let mcpConnectionMessage = mcpConfigured
       ? "Hermes MCP connection has not been tested yet"
-      : "Hermes MCP server is not configured";
+      : mcpDisabled
+        ? "Hermes MCP server is disabled"
+        : "Hermes MCP server is not configured";
 
     if (!hermesAvailable) {
       mcpConnectionMessage = hermesMessage;
