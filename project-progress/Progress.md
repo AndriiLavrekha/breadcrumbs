@@ -9,14 +9,14 @@ project: progress-tracker
 progress_schema_version: 1
 status: active
 path: C:/Users/nkinc/Documents/progress-tracker
-agent_last_used: claude
-provider_last_used: claude-code
-model_last_used: claude-opus-5-5
-effort_last_used: unknown
-updated: 2026-10-20
-last_milestone: v0.6.0 released with progress compaction
+agent_last_used: hermes
+provider_last_used: hermes
+model_last_used: google/gemini-4-argon
+effort_last_used: high
+updated: 2026-11-11
+last_milestone: PR #1 opened for npm 12+ allow-git and disabled Hermes MCP detection
 deployed: true
-deployment_url: https://github.com/AndriiLavrekha/awesome-progress-tracker/releases/tag/v0.6.0
+deployment_url: https://github.com/AndriiLavrekha/breadcrumbs/pull/1
 sensitivity: normal
 commit_progress: true
 ---
@@ -25,14 +25,12 @@ commit_progress: true
 
 ## Resume Snapshot
 
-`v0.6.0` is released (tag and GitHub release, `main` at `811e41a` plus this progress commit). It ships progress compaction: `awesome-progress-tracker compact [dir] [--write]` (dry run default; Archive.md written first; refuses non-UTF-8; repairs Windows-1252 mojibake), SessionStart `Progress health:` line, stop hook reporting all validator problems once per session, and an MCP Done fold that returns `unarchivedItems` instead of losing them. Built subagent-driven from `docs/superpowers/plans/2026-10-20-progress-compaction.md`; every task passed spec and quality review and a final whole-branch review. Tests 396/397 under WSL (1 pre-existing WSL-only failure).
-
-Deferred minors: Archive.md takes Progress.md's line ending; archive dates are UTC; the stop-hook problem summary reaches only the user when Progress.md is fresh; near-miss section notes match title prefixes only. Benchmark runs 01–03 still unrecorded; Codex `stop-soft` promotion still open.
+Opened PR #1 (`fix/hermes-mcp-allow-git-and-disabled-status`) fixing two Hermes/npm 12+ integration bugs discovered during live `breadcrumbs status -g hermes` and `breadcrumbs doctor -g hermes` verification: (1) added `npm_config_allow_git=all` to generated MCP server environments across Hermes, Claude, and Codex so `npx -y github:AndriiLavrekha/breadcrumbs mcp` works under `npm@12+` (which defaults `allow-git` to `none` and previously failed with `EALLOWGIT`), and (2) updated Hermes `mcp list` parsing to inspect the `enabled`/`disabled` status column so disabled servers are rolled back on `install` and reported accurately by `status` and `doctor`. All 23 test files (406 passed, 1 skipped), `npm run typecheck`, `npm run build`, and live `breadcrumbs doctor -g hermes` (`doctor_ok: true`) pass.
 
 
 ## Current State
 
-This repository contains a Markdown-first project progress workflow for Codex, Claude Code, and future agent tooling. The Codex plugin behavior now covers initialized, uninitialized, and opted-out projects.
+This repository contains a Markdown-first project progress workflow for Codex, Claude Code, and Hermes Agent.
 
 The approved direction is skill-first and project-local:
 
@@ -46,12 +44,12 @@ The approved direction is skill-first and project-local:
 
 ## Last Session
 
-Executed the 11-task compaction plan subagent-driven (implementer + spec review + quality review per task), applied review fixes (data-loss gap in MCP fold ordering, non-UTF-8 corruption, open-task syntaxes, BOM order, stop summary ordering, compact-prompt churn), rebuilt dist.
+Diagnosed live `breadcrumbs doctor -g hermes` failure (`EALLOWGIT` under Hermes-bundled `npm@12.0.2` plus silent `✗ disabled` persistence on failed `hermes mcp add`), wrote failing unit tests in `tests/mcp/cli.test.ts`, implemented the fix in `src/cli.ts` and `dist/src/cli.js`, verified the full test suite and live Hermes CLI (`doctor_ok: true`), and opened PR #1.
 
 
 ## Next Action
 
-Task 12: clean up `D:/depot/agenticwars-game-backup/project-progress` per the spec's agenticwars section, after updating the installed plugin to v0.6.0, with the owner's approval before each write (checkpoint commit, `compact --write`, hand-pass edits).
+Review and merge PR #1 (`https://github.com/AndriiLavrekha/breadcrumbs/pull/1`) into `main`.
 
 
 ## Remaining Work

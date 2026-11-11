@@ -327,7 +327,8 @@ describe("npm CLI", () => {
       command: "npx",
       args: ["-y", "github:AndriiLavrekha/breadcrumbs", "mcp"],
       env: {
-        PROJECT_PROGRESS_ROOTS: path.resolve("C:/repo").replace(/\\/g, "/")
+        PROJECT_PROGRESS_ROOTS: path.resolve("C:/repo").replace(/\\/g, "/"),
+        npm_config_allow_git: "all"
       }
     });
   });
@@ -350,6 +351,7 @@ describe("npm CLI", () => {
     expect(configToml).toContain("[mcp_servers.breadcrumbs]");
     expect(configToml).toContain('args = ["-y", "github:AndriiLavrekha/breadcrumbs", "mcp"]');
     expect(configToml).toContain('PROJECT_PROGRESS_ROOTS = "C:/one;C:/two"');
+    expect(configToml).toContain('npm_config_allow_git = "all"');
   });
 
   it("installs Hermes managed skill and MCP server with the command runner", async () => {
@@ -402,6 +404,8 @@ describe("npm CLI", () => {
           "npx",
           "--env",
           "PROJECT_PROGRESS_ROOTS=C:/one;C:/two",
+          "--env",
+          "npm_config_allow_git=all",
           "--args",
           "-y",
           "github:AndriiLavrekha/breadcrumbs",
@@ -457,6 +461,8 @@ describe("npm CLI", () => {
           "npx",
           "--env",
           "PROJECT_PROGRESS_ROOTS=C:/one;C:/two",
+          "--env",
+          "npm_config_allow_git=all",
           "--args",
           "-y",
           "github:AndriiLavrekha/breadcrumbs",
@@ -615,6 +621,8 @@ describe("npm CLI", () => {
           "npx",
           "--env",
           "PROJECT_PROGRESS_ROOTS=C:/one;C:/two",
+          "--env",
+          "npm_config_allow_git=all",
           "--args",
           "-y",
           "github:AndriiLavrekha/breadcrumbs",
@@ -685,6 +693,8 @@ describe("npm CLI", () => {
           "npx",
           "--env",
           "PROJECT_PROGRESS_ROOTS=C:/one;C:/two",
+          "--env",
+          "npm_config_allow_git=all",
           "--args",
           "-y",
           "github:AndriiLavrekha/breadcrumbs",
@@ -699,6 +709,98 @@ describe("npm CLI", () => {
         stdin: "y\n"
       }
     ]);
+  });
+
+  it("removes a disabled Hermes MCP server and rolls back the skill when mcp add saves a failed server as disabled", async () => {
+    const calls: Array<{ command: string; args: string[]; stdin?: string }> = [];
+    let mcpListCount = 0;
+    const runner = async (command: string, args: string[], options?: { stdin?: string }) => {
+      calls.push({ command, args, stdin: options?.stdin });
+      if (args[0] === "skills" && args[1] === "list") {
+        return { stdout: "NAME SOURCE\nother hub\n", stderr: "" };
+      }
+      if (args[0] === "mcp" && args[1] === "list") {
+        mcpListCount += 1;
+        return {
+          stdout:
+            mcpListCount === 1
+              ? "NAME STATUS\nother enabled\n"
+              : "  Name             Transport                      Tools        Status\n  ──────────────── ────────────────────────────── ──────────── ──────────\n  breadcrumbs      npx -y github:AndriiLavre...   all          ✗ disabled\n",
+          stderr: ""
+        };
+      }
+      return { stdout: "", stderr: "" };
+    };
+
+    await expect(
+      installAgent({
+        agent: "hermes",
+        roots: "C:/one;C:/two",
+        commandRunner: runner
+      })
+    ).rejects.toThrow(/Hermes MCP server was saved as disabled after add/i);
+
+    expect(calls).toContainEqual({
+      command: "hermes",
+      args: ["mcp", "remove", "breadcrumbs"],
+      stdin: "y\n"
+    });
+    expect(calls).toContainEqual({
+      command: "hermes",
+      args: ["skills", "uninstall", "breadcrumbs"],
+      stdin: "y\n"
+    });
+  });
+
+  it("treats a disabled Hermes MCP server as unconfigured in status and doctor while still uninstalling it", async () => {
+    const project = await fs.mkdtemp(path.join(os.tmpdir(), "project-progress-project-"));
+    await initProject({ cwd: project, projectName: "Hermes Project" });
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "project-progress-home-"));
+    const disabledMcpOutput =
+      "  Name             Transport                      Tools        Status\n  ──────────────── ────────────────────────────── ──────────── ──────────\n  breadcrumbs      npx -y github:AndriiLavre...   all          ✗ disabled\n";
+
+    const runner = async (command: string, args: string[]) => {
+      if (args[0] === "--version") {
+        return { stdout: "Hermes 1.2.3\n", stderr: "" };
+      }
+      if (args[0] === "skills" && args[1] === "list") {
+        return { stdout: "NAME SOURCE\nbreadcrumbs hub\n", stderr: "" };
+      }
+      if (args[0] === "mcp" && args[1] === "list") {
+        return { stdout: disabledMcpOutput, stderr: "" };
+      }
+      if (args[0] === "mcp" && args[1] === "remove") {
+        return { stdout: "", stderr: "" };
+      }
+      if (args[0] === "skills" && args[1] === "uninstall") {
+        return { stdout: "", stderr: "" };
+      }
+      throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
+    };
+
+    expect(await readStatus({ agent: "hermes", cwd: project, commandRunner: runner })).toMatchObject({
+      agent: "hermes",
+      skillInstalled: true,
+      mcpConfigured: false
+    });
+
+    const doctor = await runDoctor({ agent: "hermes", cwd: project, homeDir: home, commandRunner: runner });
+    expect(doctor.ok).toBe(false);
+    expect(doctor.checks.find((check) => check.name === "mcp")).toEqual({
+      name: "mcp",
+      ok: false,
+      message: "Hermes MCP server is disabled"
+    });
+    expect(doctor.checks.find((check) => check.name === "mcp-connection")).toEqual({
+      name: "mcp-connection",
+      ok: false,
+      message: "Hermes MCP server is disabled"
+    });
+
+    await expect(uninstallAgent({ agent: "hermes", commandRunner: runner })).resolves.toEqual({
+      agent: "hermes",
+      changedFiles: ["Hermes MCP server: breadcrumbs", "Hermes skill: breadcrumbs"]
+    });
   });
 
   it("reports Hermes status from managed list commands", async () => {
@@ -930,7 +1032,8 @@ describe("npm CLI", () => {
       command: "npx",
       args: ["-y", "github:AndriiLavrekha/breadcrumbs", "mcp"],
       env: {
-        PROJECT_PROGRESS_ROOTS: "C:/repo"
+        PROJECT_PROGRESS_ROOTS: "C:/repo",
+        npm_config_allow_git: "all"
       }
     });
   });
