@@ -424,7 +424,6 @@ export async function installAgent(options = {}) {
                 "npx",
                 "--env",
                 `PROJECT_PROGRESS_ROOTS=${roots}`,
-                "--env",
                 "npm_config_allow_git=all",
                 "--args",
                 "-y",

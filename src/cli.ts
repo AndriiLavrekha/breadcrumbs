@@ -569,7 +569,6 @@ export async function installAgent(options: InstallOptions = {}): Promise<Instal
         "npx",
         "--env",
         `PROJECT_PROGRESS_ROOTS=${roots}`,
-        "--env",
         "npm_config_allow_git=all",
         "--args",
         "-y",
