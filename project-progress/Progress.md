@@ -3,8 +3,8 @@ checkpoint_at: 2026-10-20T16:31:14Z
 worktree_dirty: true
 base_branch: feat/progress-compaction
 base_commit: ce19a80989a1d111eaa81b06fec78be9f93244a8
-session_id: d83fb21f-daf8-454f-99a9-7f5b389b393f
-handoff: clean
+session_id: 27a6a533-2a31-4af9-9489-c44d6c4959e0
+handoff: interrupted
 project: progress-tracker
 progress_schema_version: 1
 status: active
@@ -14,7 +14,7 @@ provider_last_used: hermes
 model_last_used: google/gemini-4-argon
 effort_last_used: high
 updated: 2026-11-11
-last_milestone: PR #1 opened for npm 12+ allow-git and disabled Hermes MCP detection
+last_milestone: v0.8.1 released
 deployed: true
 deployment_url: https://github.com/AndriiLavrekha/breadcrumbs/pull/1
 sensitivity: normal
@@ -25,8 +25,7 @@ commit_progress: true
 
 ## Resume Snapshot
 
-Opened PR #1 (`fix/hermes-mcp-allow-git-and-disabled-status`) fixing two Hermes/npm 12+ integration bugs discovered during live `breadcrumbs status -g hermes` and `breadcrumbs doctor -g hermes` verification: (1) added `npm_config_allow_git=all` to generated MCP server environments across Hermes, Claude, and Codex so `npx -y github:AndriiLavrekha/breadcrumbs mcp` works under `npm@12+` (which defaults `allow-git` to `none` and previously failed with `EALLOWGIT`), and (2) updated Hermes `mcp list` parsing to inspect the `enabled`/`disabled` status column so disabled servers are rolled back on `install` and reported accurately by `status` and `doctor`. All 23 test files (406 passed, 1 skipped), `npm run typecheck`, `npm run build`, and live `breadcrumbs doctor -g hermes` (`doctor_ok: true`) pass.
-
+v0.8.1 released: PRs #1/#2 (npm 12+ `allow_git`, single `--env` for Hermes `mcp add`, disabled-server detection) plus a hardened `hermes mcp list` parser (ignores titles/footers, tests for box-table and enabled rows) and README/plan docs updated. 412 tests, typecheck and build pass in WSL. Local Hermes Agent was uninstalled (config kept) because its auto-update failed.
 
 ## Current State
 
@@ -49,8 +48,7 @@ Diagnosed live `breadcrumbs doctor -g hermes` failure (`EALLOWGIT` under Hermes-
 
 ## Next Action
 
-Review and merge PR #1 (`https://github.com/AndriiLavrekha/breadcrumbs/pull/1`) into `main`.
-
+Publish `@andriilavrekha/breadcrumbs@0.8.1` to npm (needs owner 2FA), then verify `breadcrumbs install -g hermes` against a real Hermes `mcp add --env A=1 B=2`.
 
 ## Remaining Work
 

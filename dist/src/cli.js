@@ -325,21 +325,27 @@ function parseHermesSkillList(output) {
 }
 function parseHermesMcpServers(output) {
     const servers = new Map();
-    for (const line of stripAnsi(output).split("\n")) {
+    for (const line of stripAnsi(output).split(/\r?\n/)) {
         const trimmed = line.trim();
-        if (!trimmed)
+        if (!trimmed) {
+            // A blank line after the rows ends the table, so footer text is never read as a server.
+            if (servers.size > 0)
+                break;
             continue;
+        }
         if (/^[\u2500-\u257F\s]+$/u.test(trimmed))
             continue;
         const boxTableCells = [...trimmed.matchAll(/│([^│]*)/g)].map((match) => match[1].trim()).filter(Boolean);
         const firstColumn = boxTableCells[0] ?? trimmed.match(/^(\S+)/)?.[1];
         if (!firstColumn)
             continue;
-        if (firstColumn.toLowerCase() === "name")
+        if (firstColumn.toLowerCase() === "name") {
+            servers.clear(); // anything above the header is a title, not a server
             continue;
+        }
+        // shortcut: assumes status is the last column; revisit if Hermes reorders `mcp list` columns.
         const statusTarget = boxTableCells.length > 1 ? boxTableCells[boxTableCells.length - 1] : trimmed;
-        const disabled = /\bdisabled\s*$/i.test(statusTarget);
-        servers.set(firstColumn, { enabled: !disabled });
+        servers.set(firstColumn, { enabled: !/\bdisabled\b/i.test(statusTarget) });
     }
     return servers;
 }

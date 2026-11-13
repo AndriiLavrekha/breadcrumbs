@@ -1,5 +1,11 @@
 # Release Checklist
 
+## Breadcrumbs v0.8.1 patch release
+
+- [x] Hermes `mcp add` env-flag shape, npm 12+ `allow_git` and disabled-server detection fixed (#1, #2); parser hardened for titles and footers.
+- [x] Full tests, typecheck and build pass in WSL.
+- [ ] npm package published and registry install verified (registry requires owner2FA).
+
 ## Breadcrumbs v0.8.0 identity release
 
 - [x] Both plugin and marketplace manifests identify `breadcrumbs`; install selector `breadcrumbs@breadcrumbs`.

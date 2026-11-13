@@ -799,6 +799,22 @@ describe("npm CLI", () => {
     });
   });
 
+  it.each([
+    ["box table, enabled", "│ Name │ Status │\n│ breadcrumbs │ ✓ enabled │\n", true],
+    ["box table, disabled", "│ Name │ Status │\n│ breadcrumbs │ ✗ disabled │\n", false],
+    ["title above header is not a server", "MCP Servers\n\nName Status\nother enabled\n", false],
+    ["footer below table is not a server", "Name Status\nother enabled\n\nbreadcrumbs disabled\n", false],
+    ["enabled row after other rows", "Name Status\nother disabled\nbreadcrumbs enabled\n", true]
+  ])("parses Hermes mcp list: %s", async (_label, stdout, expected) => {
+    const project = await fs.mkdtemp(path.join(os.tmpdir(), "project-progress-project-"));
+    await initProject({ cwd: project, projectName: "Hermes Project" });
+    const runner = async (_command: string, args: string[]) => {
+      if (args[0] === "skills") return { stdout: "NAME SOURCE\nbreadcrumbs hub\n", stderr: "" };
+      return { stdout, stderr: "" };
+    };
+    expect((await readStatus({ agent: "hermes", cwd: project, commandRunner: runner })).mcpConfigured).toBe(expected);
+  });
+
   it("reports Hermes status from managed list commands", async () => {
     const calls: Array<{ command: string; args: string[]; stdin?: string }> = [];
     const project = await fs.mkdtemp(path.join(os.tmpdir(), "project-progress-project-"));
