@@ -1,13 +1,8 @@
-export type ProjectStatus =
-  | "idea"
-  | "active"
-  | "blocked"
-  | "paused"
-  | "done"
-  | "deployed"
-  | "archived";
+import type { ALLOWED_SENSITIVITY, ALLOWED_STATUSES } from "../hook/schema.js";
 
-export type Sensitivity = "normal" | "private" | "sensitive";
+export type ProjectStatus = (typeof ALLOWED_STATUSES)[number];
+
+export type Sensitivity = (typeof ALLOWED_SENSITIVITY)[number];
 
 export interface ProjectSummary {
   progressPath: string;

@@ -9,7 +9,6 @@ import { extractSection, parseFrontmatter, parseProjectSummary } from "./markdow
 import { sha256 } from "../hash.js";
 import path from "node:path";
 import {
-  ALLOWED_PROGRESS_SECTIONS,
   MAX_LAST_MILESTONE_LENGTH,
   MAX_SECTION_CONTENT_LENGTH,
   appendToArchive,
@@ -28,11 +27,10 @@ import {
 import type { ProjectSummary } from "./schema.js";
 import { listProjectTrackingStates, resetProjectTrackingState } from "../project-state.js";
 import type { ProjectStateOptions } from "../project-state.js";
-import { ALLOWED_GATE_VALUES, GATE_KEYS } from "../hook/schema.js";
+import { ALLOWED_GATE_VALUES, ALLOWED_PROGRESS_SECTIONS, ALLOWED_STATUSES, GATE_KEYS } from "../hook/schema.js";
 import { PACKAGE_VERSION } from "../package.js";
 
 const DEFAULT_EXCLUDES = DEFAULT_DISCOVERY_EXCLUDES;
-const PROJECT_STATUSES = ["idea", "active", "blocked", "paused", "done", "deployed", "archived"] as const;
 const DEFAULT_MAX_PROJECTS = 50;
 const DEFAULT_MAX_STRING_LENGTH = 1000;
 const DEFAULT_MAX_INDEX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -395,7 +393,7 @@ export function createServer(): McpServer {
     {
       description: "List compact summaries from the cached project index. Filter by status when needed.",
       inputSchema: {
-        status: z.enum(PROJECT_STATUSES).optional()
+        status: z.enum(ALLOWED_STATUSES).optional()
       }
     },
     async ({ status }) => {
@@ -501,7 +499,7 @@ export function createServer(): McpServer {
       description: "Update frontmatter status and last_milestone in a project's Progress.md.",
       inputSchema: {
         project: projectSelectorSchema,
-        status: z.enum(PROJECT_STATUSES),
+        status: z.enum(ALLOWED_STATUSES),
         last_milestone: lastMilestoneSchema
       }
     },

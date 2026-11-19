@@ -20,19 +20,6 @@ export function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export const ALLOWED_PROGRESS_SECTIONS = [
-  "Resume Snapshot",
-  "Current State",
-  "Last Session",
-  "Next Action",
-  "Remaining Work",
-  "Done",
-  "Blockers",
-  "Deployment",
-  "Completion Criteria",
-  "Resume Instructions"
-] as const;
-
 const ALLOWED_SECTION_SET = new Set<string>(ALLOWED_PROGRESS_SECTIONS);
 
 export function validateSectionName(title: string): string | undefined {
@@ -236,4 +223,5 @@ export function replaceFrontmatterValue(markdown: string, key: string, value: st
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { sha256 } from "../hash.js";
+import { ALLOWED_PROGRESS_SECTIONS } from "../hook/schema.js";
 import { sectionMatches, splitLinesWithEndings } from "./markdown.js";

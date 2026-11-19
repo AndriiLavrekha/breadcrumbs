@@ -21,6 +21,18 @@ export const ALLOWED_STATUSES = [
     "archived"
 ];
 export const ALLOWED_SENSITIVITY = ["normal", "private", "sensitive"];
+export const ALLOWED_PROGRESS_SECTIONS = [
+    "Resume Snapshot",
+    "Current State",
+    "Last Session",
+    "Next Action",
+    "Remaining Work",
+    "Done",
+    "Blockers",
+    "Deployment",
+    "Completion Criteria",
+    "Resume Instructions"
+];
 export const GATE_KEYS = [
     "gate_implementation",
     "gate_tests",

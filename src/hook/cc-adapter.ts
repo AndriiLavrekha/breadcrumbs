@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathExists } from "../fs-util.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { bodyHash, sha256 } from "../hash.js";
 import { extractSection, isKnownRuntimeValue, parseFrontmatter, renderLastRuntime } from "../mcp/markdown.js";
@@ -36,7 +37,7 @@ export interface HookResult {
 
 async function initializationGuidance(cwd: string, hookEventName: string): Promise<HookResult> {
   const progressPath = progressPathFor(cwd);
-  if (await fileExists(progressPath)) return { code: 0 };
+  if (await pathExists(progressPath)) return { code: 0 };
 
   const state = await bestEffortReadProjectState(cwd);
   if (state === "opted-out") return { code: 0 };
@@ -62,15 +63,6 @@ async function initializationGuidance(cwd: string, hookEventName: string): Promi
 
 function progressPathFor(cwd: string): string {
   return path.join(cwd, "project-progress", "Progress.md");
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function sessionStateDir(): string {
@@ -379,7 +371,7 @@ export async function handleSessionStart(event: HookEvent): Promise<HookResult> 
   await pruneSessionState();
   const fresh = await recordSessionStart(event.session_id, cwd, event.source, await readHandoff(progressPath));
 
-  if (!(await fileExists(progressPath))) {
+  if (!(await pathExists(progressPath))) {
     return await initializationGuidance(cwd, "SessionStart");
   }
 
@@ -480,7 +472,7 @@ export async function handlePreCommit(event: HookEvent): Promise<HookResult> {
   if (commitArgs === null) return { code: 0 };
 
   const progressPath = progressPathFor(cwd);
-  if (!(await fileExists(progressPath))) return { code: 0 };
+  if (!(await pathExists(progressPath))) return { code: 0 };
 
   // ADR 0009: for a confidently classified commit, anything we cannot verify blocks the commit.
   // runHook turns every throw into "allow", so failures must be caught here.
@@ -533,7 +525,7 @@ export async function handlePreCommit(event: HookEvent): Promise<HookResult> {
 export async function handlePreEdit(event: HookEvent): Promise<HookResult> {
   const cwd = event.cwd ?? process.cwd();
   const progressPath = progressPathFor(cwd);
-  if (!(await fileExists(progressPath))) return { code: 0 };
+  if (!(await pathExists(progressPath))) return { code: 0 };
 
   const filePath = (event.tool_input?.file_path as string | undefined) ?? "";
   const normalized = filePath.replace(/\\/g, "/");
@@ -595,7 +587,7 @@ export async function handleStop(event: HookEvent, options: HandleStopOptions = 
   const { allowBlock = true } = options;
   const cwd = event.cwd ?? process.cwd();
   const progressPath = progressPathFor(cwd);
-  if (!(await fileExists(progressPath))) return { code: 0 };
+  if (!(await pathExists(progressPath))) return { code: 0 };
 
   const sessionState = await readSessionState(event.session_id);
   // Only nudge when the session did work, so read-only sessions are never nagged. Work is a dirty tree

@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { pathExists } from "../fs-util.js";
 import { parseProjectSummary } from "./markdown.js";
 import type { ProjectSummary } from "./schema.js";
 
@@ -18,15 +19,6 @@ export interface DiscoveryDiagnostics {
 export interface DiscoveryResult {
   projects: ProjectSummary[];
   diagnostics: DiscoveryDiagnostics;
-}
-
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 async function mapWithConcurrency<T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {

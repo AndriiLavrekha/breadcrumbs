@@ -13,3 +13,12 @@ export async function writeTextAtomic(filePath, text) {
         await fs.rm(tempPath, { force: true }).catch(() => undefined);
     }
 }
+export async function pathExists(filePath) {
+    try {
+        await fs.access(filePath);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}

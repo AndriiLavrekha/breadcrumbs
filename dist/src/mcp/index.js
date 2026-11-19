@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { writeTextAtomic } from "../fs-util.js";
+import { pathExists, writeTextAtomic } from "../fs-util.js";
 import { discoverProjects } from "./discovery.js";
 function defaultHomeDir() {
     return process.env.AWESOME_PROGRESS_TRACKER_HOME ?? os.homedir();
@@ -14,15 +14,6 @@ export function indexJsonPath(homeDir = defaultHomeDir()) {
 }
 export function indexMarkdownPath(homeDir = defaultHomeDir()) {
     return path.join(indexDir(homeDir), "Projects.md");
-}
-async function pathExists(filePath) {
-    try {
-        await fs.access(filePath);
-        return true;
-    }
-    catch {
-        return false;
-    }
 }
 function sortProjects(projects) {
     return [...projects].sort((left, right) => left.project.localeCompare(right.project));

@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { writeTextAtomic } from "../fs-util.js";
+import { pathExists, writeTextAtomic } from "../fs-util.js";
 import { discoverProjects } from "./discovery.js";
 import type { ProjectSummary } from "./schema.js";
 
@@ -31,15 +31,6 @@ export function indexJsonPath(homeDir = defaultHomeDir()): string {
 
 export function indexMarkdownPath(homeDir = defaultHomeDir()): string {
   return path.join(indexDir(homeDir), "Projects.md");
-}
-
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function sortProjects(projects: ProjectSummary[]): ProjectSummary[] {

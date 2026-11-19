@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { parseProjectSummary } from "./mcp/markdown.js";
+import { pathExists } from "./fs-util.js";
 import { indexDir, upsertIndexedProject } from "./mcp/index.js";
 import { main as runMcpServer } from "./mcp/server.js";
 import { sha256 } from "./hash.js";
@@ -109,15 +110,6 @@ Environment:
 function inferProjectName(targetRoot) {
     const name = path.basename(path.resolve(targetRoot));
     return name || "Project";
-}
-async function pathExists(filePath) {
-    try {
-        await fs.access(filePath);
-        return true;
-    }
-    catch {
-        return false;
-    }
 }
 function replaceTemplateValues(markdown, options) {
     return markdown

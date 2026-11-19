@@ -3,35 +3,14 @@ import path from "node:path";
 import { KEPT_PROGRESS_SECTIONS, planCompaction, readProgressFiles } from "../compact.js";
 import { extractSection, listSections, parseFrontmatter } from "../mcp/markdown.js";
 import { MAX_SECTION_CONTENT_LENGTH } from "../mcp/writer.js";
-import { validateFrontmatter } from "./schema.js";
-
-export const REQUIRED_PROGRESS_SECTIONS = [
-  "Resume Snapshot",
-  "Current State",
-  "Last Session",
-  "Next Action",
-  "Remaining Work",
-  "Done",
-  "Blockers",
-  "Deployment",
-  "Completion Criteria",
-  "Resume Instructions"
-] as const;
+import { pathExists } from "../fs-util.js";
+import { ALLOWED_PROGRESS_SECTIONS, validateFrontmatter } from "./schema.js";
 
 const SECRET_PATTERNS: Array<[string, RegExp]> = [
   ["OpenAI-style API key", /\bsk-[A-Za-z0-9_-]{16,}\b/],
   ["GitHub token", /\bgh(?:p|o|u|s|r)_[A-Za-z0-9_]{20,}\b/],
   ["generic password assignment", /\b(?:password|passwd|pwd)\b\s*[:=]\s*['"]?[^'"\s]+/i]
 ];
-
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 async function siblingMarkdown(progressPath: string): Promise<string> {
   const dir = path.dirname(progressPath);
@@ -60,7 +39,7 @@ export async function validateProgressFile(progressPath: string): Promise<string
   const errors = validateFrontmatter(parseFrontmatter(markdown));
 
   const sections = new Set(listSections(markdown));
-  for (const section of [...REQUIRED_PROGRESS_SECTIONS].filter((s) => !sections.has(s)).sort()) {
+  for (const section of [...ALLOWED_PROGRESS_SECTIONS].filter((s) => !sections.has(s)).sort()) {
     errors.push(`Missing required section: ${section}`);
   }
 
