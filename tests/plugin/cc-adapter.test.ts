@@ -278,6 +278,98 @@ describe("cc-adapter pre-commit guard", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toBeUndefined();
   });
+
+  async function restrictedRepoWithDirtyProgress(): Promise<string> {
+    const dir = await makeRepo();
+    const file = await writeProgress(dir, progressDoc({ sensitivity: "sensitive" }));
+    await commitAll(dir, "init");
+    await fs.appendFile(file, "\nedited after commit\n", "utf-8");
+    return dir;
+  }
+
+  function decision(result: { stdout?: string }): string | undefined {
+    return result.stdout ? JSON.parse(result.stdout).hookSpecificOutput.permissionDecision : undefined;
+  }
+
+  it("denies git commit -am when restricted progress has tracked changes", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: 'git commit -am "x"' } });
+    expect(decision(result)).toBe("deny");
+    expect(JSON.parse(result.stdout!).hookSpecificOutput.permissionDecisionReason).toContain("instead of -a");
+  });
+
+  it("denies git add -A && git commit when restricted progress is dirty", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: "git add -A && git commit -m x" } });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("denies git add . && git commit when restricted progress is untracked", async () => {
+    const dir = await makeRepo();
+    await writeProgress(dir, progressDoc({ commit_progress: "false" }));
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: "git add . && git commit -m x" } });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("denies git commit with an explicit project-progress path", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({
+      cwd: dir,
+      tool_input: { command: "git commit project-progress/Progress.md -m x" }
+    });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("allows git add of a specific file then commit while restricted progress is dirty", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({
+      cwd: dir,
+      tool_input: { command: "git add src/x.ts && git commit -m y" }
+    });
+    expect(result.stdout).toBeUndefined();
+  });
+
+  it("allows git commit -m with the letter a in the message", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: 'git commit -m "fix a bug"' } });
+    expect(result.stdout).toBeUndefined();
+  });
+
+  it("does not treat --amend as -a", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: "git commit --amend -m x" } });
+    expect(result.stdout).toBeUndefined();
+  });
+
+  it("allows git commit -a when only untracked progress exists", async () => {
+    const dir = await makeRepo();
+    await writeProgress(dir, progressDoc({ commit_progress: "false" }));
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: "git commit -am x" } });
+    expect(result.stdout).toBeUndefined();
+  });
+
+  it("denies a commit when git cannot be inspected", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-cc-nogit-"));
+    await writeProgress(dir, progressDoc({ sensitivity: "sensitive" }));
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: "git commit -m x" } });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("denies a commit when Progress.md cannot be read", async () => {
+    const dir = await makeRepo();
+    await fs.mkdir(path.join(dir, "project-progress", "Progress.md"), { recursive: true });
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: "git commit -m x" } });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("does not deny commands that only mention commit when git cannot be inspected", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-cc-nogit-"));
+    await writeProgress(dir, progressDoc({ sensitivity: "sensitive" }));
+    for (const command of ["git log --grep commit", 'echo "git commit later"', "git commit-graph write"]) {
+      const result = await handlePreCommit({ cwd: dir, tool_input: { command } });
+      expect(result.stdout, command).toBeUndefined();
+    }
+  });
 });
 
 describe("cc-adapter pre-edit reminder", () => {

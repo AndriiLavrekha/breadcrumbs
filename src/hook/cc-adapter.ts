@@ -245,18 +245,50 @@ function gitHasChanges(cwd: string): boolean {
     .some((line) => !isProgressPath(line));
 }
 
-function stagedFiles(cwd: string): string[] {
+// null means git could not be inspected; callers that guard something must not read that as "nothing staged".
+function stagedFiles(cwd: string): string[] | null {
   const out = git(cwd, ["diff", "--cached", "--name-only"]);
-  if (!out) return [];
+  if (out === null) return null;
   return out
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
 }
 
-function isCommitCommand(command: string): boolean {
-  // Match `git commit ...` (allow flags/env prefixes), not `git commit-graph` etc.
-  return /\bgit\b[\s\S]*\bcommit\b(?![\w-])/.test(command);
+// Matches `git [-C path] [-c k=v] <subcommand>` only where a command starts (line start, after ; & | ( or
+// then/do, after env assignments), so `git log --grep commit` and `echo "git commit later"` never match.
+// Returns the rest of that shell segment, i.e. the subcommand's arguments, or null.
+function gitSubcommandArguments(command: string, subcommand: "commit" | "add"): string | null {
+  const pattern = new RegExp(
+    String.raw`(?:^|[;&|(\n]|\b(?:then|do)\b)\s*(?:\w+=\S*\s+)*git(?:\s+(?:-C\s+\S+|-c\s+\S+|--[\w-]+(?:=\S+)?))*\s+${subcommand}(?![\w-])([^;&|\n]*)`
+  );
+  const match = pattern.exec(command);
+  return match ? match[1] : null;
+}
+
+function unquote(token: string): string {
+  return token.replace(/^["']|["']$/g, "");
+}
+
+function tokens(args: string): string[] {
+  return args.split(/\s+/).map(unquote).filter((token) => token.length > 0);
+}
+
+function namesProgressPath(args: string): boolean {
+  return tokens(args).some((token) => token.replace(/\\/g, "/").includes("project-progress"));
+}
+
+// `-a`, `--all`, or a short-flag group containing `a` (`-am`). Message text is a separate token, so "fix a bug" never matches.
+function commitStagesTracked(args: string): boolean {
+  return tokens(args).some((token) => token === "--all" || /^-[A-Za-z]*a[A-Za-z]*$/.test(token));
+}
+
+// shortcut: pathspec magic other than the forms below (e.g. `:(glob)**`) is not recognised, extend if seen in the wild.
+function addIsBroad(args: string): boolean {
+  return tokens(args).some(
+    (token) =>
+      [".", "./", ":/", "*", "--all", "--update"].includes(token) || /^-[A-Za-z]*[Au][A-Za-z]*$/.test(token)
+  );
 }
 
 function emitJson(value: unknown): string {
@@ -372,38 +404,74 @@ export async function handleUserPromptSubmit(event: HookEvent): Promise<HookResu
   return await initializationGuidance(event.cwd ?? process.cwd(), "UserPromptSubmit");
 }
 
-export async function handlePreCommit(event: HookEvent): Promise<HookResult> {
-  const cwd = event.cwd ?? process.cwd();
-  const command = event.tool_input?.command ?? "";
-  if (!isCommitCommand(command)) return { code: 0 };
-
-  const progressPath = progressPathFor(cwd);
-  if (!(await fileExists(progressPath))) return { code: 0 };
-
-  const markdown = await fs.readFile(progressPath, "utf-8");
-  const frontmatter = parseFrontmatter(markdown);
-  const restricted = frontmatter.commit_progress === false || frontmatter.sensitivity === "sensitive";
-  if (!restricted) return { code: 0 };
-
-  const progressStaged = stagedFiles(cwd).some((file) =>
-    file.replace(/\\/g, "/").includes("project-progress/")
-  );
-  if (!progressStaged) return { code: 0 };
-
-  const why = frontmatter.commit_progress === false ? "commit_progress: false" : "sensitivity: sensitive";
+function denyCommit(reason: string): HookResult {
   return {
     code: 0,
     stdout: emitJson({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason:
-          `project-progress files are staged but Progress.md declares ${why}. ` +
-          "Unstage them with `git restore --staged project-progress/` before committing, " +
-          "or change the policy in Progress.md if sharing is intended."
+        permissionDecisionReason: reason
       }
     })
   };
+}
+
+export async function handlePreCommit(event: HookEvent): Promise<HookResult> {
+  const cwd = event.cwd ?? process.cwd();
+  const command = event.tool_input?.command ?? "";
+  const commitArgs = gitSubcommandArguments(command, "commit");
+  if (commitArgs === null) return { code: 0 };
+
+  const progressPath = progressPathFor(cwd);
+  if (!(await fileExists(progressPath))) return { code: 0 };
+
+  // ADR 0009: for a confidently classified commit, anything we cannot verify blocks the commit.
+  // runHook turns every throw into "allow", so failures must be caught here.
+  try {
+    const frontmatter = parseFrontmatter(await fs.readFile(progressPath, "utf-8"));
+    const restricted = frontmatter.commit_progress === false || frontmatter.sensitivity === "sensitive";
+    if (!restricted) return { code: 0 };
+
+    const why = frontmatter.commit_progress === false ? "commit_progress: false" : "sensitivity: sensitive";
+    const cannotInspect =
+      `Breadcrumbs could not inspect git, and Progress.md declares ${why}. ` +
+      "Fix the repository state or change the policy in Progress.md, then retry the commit.";
+
+    const staged = stagedFiles(cwd);
+    if (staged === null) return denyCommit(cannotInspect);
+    if (staged.some((file) => file.replace(/\\/g, "/").includes("project-progress/"))) {
+      return denyCommit(
+        `project-progress files are staged but Progress.md declares ${why}. ` +
+          "Unstage them with `git restore --staged project-progress/` before committing, " +
+          "or change the policy in Progress.md if sharing is intended."
+      );
+    }
+
+    // Nothing is staged yet, but this same command may stage the progress files itself.
+    const addArgs = gitSubcommandArguments(command, "add");
+    const stagesEverything = (addArgs !== null && (addIsBroad(addArgs) || namesProgressPath(addArgs))) || namesProgressPath(commitArgs);
+    const stagesTracked = commitStagesTracked(commitArgs);
+    if (stagesEverything || stagesTracked) {
+      const porcelain = git(cwd, ["status", "--porcelain", "--", "project-progress"]);
+      if (porcelain === null) return denyCommit(cannotInspect);
+      const changes = porcelain.split(/\r?\n/).filter((line) => line.trim().length > 0);
+      // `commit -a` never adds untracked files; `git add -A` and explicit paths do.
+      const wouldStage = stagesEverything ? changes : changes.filter((line) => !line.startsWith("??"));
+      if (wouldStage.length > 0) {
+        return denyCommit(
+          `This command would commit project-progress files, but Progress.md declares ${why}. ` +
+            "Commit specific paths instead of -a / git add -A, or change the policy in Progress.md if sharing is intended."
+        );
+      }
+    }
+    return { code: 0 };
+  } catch {
+    return denyCommit(
+      "Breadcrumbs could not verify whether project-progress files would be committed. " +
+        "Check that Progress.md is readable, then retry."
+    );
+  }
 }
 
 export async function handlePreEdit(event: HookEvent): Promise<HookResult> {
