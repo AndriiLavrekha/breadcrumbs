@@ -335,11 +335,9 @@ export async function archiveFoldedItems(
   }
 }
 
-// Deliberately does NOT route through textResult. That helper collapses any
-// payload carrying a string `error` into errorResult("invalid_request", ...),
-// which would discard currentContent and currentFrontmatter — the entire
-// reason the conflict payload exists. The result is built directly so the
-// merge data survives to the caller, while isError still marks the failure.
+// Built directly rather than through invalidRequest/errorResult, which would discard currentContent and
+// currentFrontmatter — the entire reason the conflict payload exists. The merge data survives to the
+// caller while isError still marks the failure.
 async function conflictResult(
   error: unknown,
   progressPath: string,
@@ -381,16 +379,12 @@ export function errorResult(code: string, message: string, hint: string) {
   };
 }
 
-function textResult(text: string) {
-  try {
-    const parsed = JSON.parse(text) as Record<string, unknown>;
-    if (typeof parsed.error === "string") {
-      return errorResult("invalid_request", parsed.error, "Correct the request and retry.");
-    }
-    return successResult(parsed, text);
-  } catch {
-    return successResult({ message: text }, text);
-  }
+function invalidRequest(message: string) {
+  return errorResult("invalid_request", message, "Correct the request and retry.");
+}
+
+function jsonResult(payload: object) {
+  return successResult(payload as Record<string, unknown>, JSON.stringify(payload));
 }
 
 export function createServer(): McpServer {
@@ -404,7 +398,10 @@ export function createServer(): McpServer {
         status: z.enum(PROJECT_STATUSES).optional()
       }
     },
-    async ({ status }) => textResult(await projectsJson(status ? (projectStatus) => projectStatus === status : undefined))
+    async ({ status }) => {
+      const text = await projectsJson(status ? (projectStatus) => projectStatus === status : undefined);
+      return successResult(JSON.parse(text), text);
+    }
   );
 
   server.registerTool(
@@ -412,7 +409,10 @@ export function createServer(): McpServer {
     {
       description: "Refresh the project index by scanning PROJECT_PROGRESS_ROOTS for project-progress/Progress.md files."
     },
-    async () => textResult(await refreshProjectsJson())
+    async () => {
+      const text = await refreshProjectsJson();
+      return successResult(JSON.parse(text), text);
+    }
   );
 
   server.registerTool(
@@ -425,7 +425,7 @@ export function createServer(): McpServer {
     },
     async ({ project }) => {
       const resolution = await resolveProject(project);
-      if (resolution.error) return textResult(JSON.stringify({ error: resolution.error }));
+      if (resolution.error) return invalidRequest(resolution.error);
       // The index is a cache that only MCP writes refresh; resuming from it would hide hand edits to Progress.md.
       let current: ProjectSummary;
       try {
@@ -433,7 +433,7 @@ export function createServer(): McpServer {
       } catch {
         return errorResult("read_failed", `Could not read ${resolution.project!.progressPath}.`, "Check that the file exists, or run refresh_projects.");
       }
-      return textResult(JSON.stringify(boundProjectSummaries([current])[0]));
+      return jsonResult(boundProjectSummaries([current])[0]);
     }
   );
 
@@ -449,12 +449,12 @@ export function createServer(): McpServer {
     },
     async ({ project, section, content }) => {
       const sectionError = validateSectionName(section);
-      if (sectionError) return textResult(JSON.stringify({ error: sectionError }));
+      if (sectionError) return invalidRequest(sectionError);
       const contentError = validateSectionContent(content);
-      if (contentError) return textResult(JSON.stringify({ error: contentError }));
+      if (contentError) return invalidRequest(contentError);
 
       const resolution = await resolveProject(project);
-      if (resolution.error) return textResult(JSON.stringify({ error: resolution.error }));
+      if (resolution.error) return invalidRequest(resolution.error);
       const match = resolution.project!;
 
       const markdown = await fs.readFile(match.progressPath, "utf-8");
@@ -482,7 +482,7 @@ export function createServer(): McpServer {
 
       await upsertIndexedProject(parseProjectSummary(updated, match.progressPath));
 
-      return textResult(JSON.stringify({
+      return jsonResult({
         updated: true,
         operation: result.operation,
         project,
@@ -491,7 +491,7 @@ export function createServer(): McpServer {
         ...archive,
         updatedAt: new Date().toISOString(),
         progressPath: match.progressPath
-      }));
+      });
     }
   );
 
@@ -507,10 +507,10 @@ export function createServer(): McpServer {
     },
     async ({ project, status, last_milestone }) => {
       const milestoneError = validateLastMilestone(last_milestone);
-      if (milestoneError) return textResult(JSON.stringify({ error: milestoneError }));
+      if (milestoneError) return invalidRequest(milestoneError);
 
       const resolution = await resolveProject(project);
-      if (resolution.error) return textResult(JSON.stringify({ error: resolution.error }));
+      if (resolution.error) return invalidRequest(resolution.error);
       const match = resolution.project!;
 
       const markdown = await fs.readFile(match.progressPath, "utf-8");
@@ -532,7 +532,7 @@ export function createServer(): McpServer {
 
       await upsertIndexedProject(parseProjectSummary(updated, match.progressPath));
 
-      return textResult(JSON.stringify({ updated: true, project, status, progressPath: match.progressPath }));
+      return jsonResult({ updated: true, project, status, progressPath: match.progressPath });
     }
   );
 
@@ -552,11 +552,11 @@ export function createServer(): McpServer {
     async ({ project, implementation, tests, review, deploy }) => {
       const updates = gateFrontmatterUpdates({ implementation, tests, review, deploy });
       if (updates.length === 0) {
-        return textResult(JSON.stringify({ error: "at least one gate must be supplied" }));
+        return invalidRequest("at least one gate must be supplied");
       }
 
       const resolution = await resolveProject(project);
-      if (resolution.error) return textResult(JSON.stringify({ error: resolution.error }));
+      if (resolution.error) return invalidRequest(resolution.error);
       const match = resolution.project!;
 
       const markdown = await fs.readFile(match.progressPath, "utf-8");
@@ -576,14 +576,12 @@ export function createServer(): McpServer {
         });
       }
 
-      return textResult(
-        JSON.stringify({
-          updated: true,
-          project,
-          gates: Object.fromEntries(updates),
-          progressPath: match.progressPath
-        })
-      );
+      return jsonResult({
+        updated: true,
+        project,
+        gates: Object.fromEntries(updates),
+        progressPath: match.progressPath
+      });
     }
   );
 
