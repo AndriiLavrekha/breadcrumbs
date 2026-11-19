@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { writeTextAtomic } from "../fs-util.js";
 import { discoverProjects } from "./discovery.js";
 import type { ProjectSummary } from "./schema.js";
 
@@ -101,7 +102,13 @@ export async function readProjectIndex(options: ProjectIndexOptions = {}): Promi
     };
   }
 
-  const parsed = JSON.parse(await fs.readFile(filePath, "utf-8")) as ProjectIndex;
+  // The index is only a cache of what discovery can rebuild, so an unreadable file must not take every tool down.
+  let parsed: ProjectIndex;
+  try {
+    parsed = JSON.parse(await fs.readFile(filePath, "utf-8")) as ProjectIndex;
+  } catch {
+    return { schemaVersion: 1, updatedAt: "", projects: [] };
+  }
   return {
     schemaVersion: 1,
     updatedAt: String(parsed.updatedAt ?? ""),
@@ -112,9 +119,9 @@ export async function readProjectIndex(options: ProjectIndexOptions = {}): Promi
 export async function writeProjectIndex(index: ProjectIndex, options: ProjectIndexOptions = {}): Promise<void> {
   const dir = indexDir(options.homeDir);
   await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(indexJsonPath(options.homeDir), `${JSON.stringify(index, null, 2)}\n`, "utf-8");
+  await writeTextAtomic(indexJsonPath(options.homeDir), `${JSON.stringify(index, null, 2)}\n`);
   if (options.writeMarkdown !== false) {
-    await fs.writeFile(indexMarkdownPath(options.homeDir), renderProjectsMarkdown(index), "utf-8");
+    await writeTextAtomic(indexMarkdownPath(options.homeDir), renderProjectsMarkdown(index));
   }
 }
 

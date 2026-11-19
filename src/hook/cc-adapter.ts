@@ -178,6 +178,8 @@ async function bestEffortRecordBodyHash(sessionId: string | undefined, markdown:
 
 async function bestEffortSetProjectState(cwd: string, state: "initialized"): Promise<void> {
   try {
+    // Every SessionStart would otherwise rewrite the shared state file for no change.
+    if ((await readProjectTrackingState(cwd)).state === state) return;
     await setProjectTrackingState(cwd, state);
   } catch {
     // best effort only

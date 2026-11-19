@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { writeTextAtomic } from "./fs-util.js";
 
 export type ProjectTrackingState = "unknown" | "opted-in" | "opted-out" | "initialized";
 
@@ -55,20 +56,18 @@ async function readStateFile(options: ProjectStateOptions = {}): Promise<Project
   try {
     const raw = await fs.readFile(filePath, "utf-8");
     const parsed = JSON.parse(raw) as ProjectTrackingStateFile;
-    if (!parsed || parsed.schemaVersion !== 1 || typeof parsed.projects !== "object") {
-      throw new Error("invalid project-state file");
-    }
-    return parsed;
+    if (parsed && parsed.schemaVersion === 1 && typeof parsed.projects === "object") return parsed;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    return { schemaVersion: 1, updatedAt: "", projects: {} };
+    // A missing or unparseable file starts empty; permission and other I/O errors still surface.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
   }
+  return { schemaVersion: 1, updatedAt: "", projects: {} };
 }
 
 async function writeStateFile(stateFile: ProjectTrackingStateFile, options: ProjectStateOptions = {}): Promise<void> {
   const filePath = projectStatePath(options);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, `${JSON.stringify(stateFile, null, 2)}\n`, "utf-8");
+  await writeTextAtomic(filePath, `${JSON.stringify(stateFile, null, 2)}\n`);
 }
 
 export async function readProjectTrackingState(
@@ -86,6 +85,8 @@ export async function listProjectTrackingStates(
   return Object.values(stateFile.projects).sort((left, right) => left.path.localeCompare(right.path));
 }
 
+// shortcut: read-modify-write without a lock, so two sessions writing at the same instant can lose one update;
+// writes happen about once per project per session, revisit if opt-outs go missing.
 export async function setProjectTrackingState(
   projectPath: string,
   state: ProjectTrackingState,

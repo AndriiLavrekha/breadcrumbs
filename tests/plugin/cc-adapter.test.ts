@@ -1303,6 +1303,24 @@ describe("cc-adapter session handoff", () => {
   });
 });
 
+describe("cc-adapter project state writes", () => {
+  it("does not rewrite project-state.json when the project is already initialized", async () => {
+    await withTrackerHome(async (home) => {
+      const dir = await makeRepo();
+      await writeProgress(dir, progressDoc({ project: "StateOnce" }));
+      await handleSessionStart({ cwd: dir, session_id: `sess-state-a-${Date.now()}`, source: "startup" });
+      const statePath = path.join(home, "project-state.json");
+      const past = new Date(Date.now() - 60_000);
+      await fs.utimes(statePath, past, past);
+      const before = (await fs.stat(statePath)).mtimeMs;
+
+      await handleSessionStart({ cwd: dir, session_id: `sess-state-b-${Date.now()}`, source: "startup" });
+
+      expect((await fs.stat(statePath)).mtimeMs).toBe(before);
+    });
+  });
+});
+
 describe("cc-adapter session state cleanup", () => {
   it("removes session state files older than 30 days at SessionStart", async () => {
     await withTrackerHome(async () => {

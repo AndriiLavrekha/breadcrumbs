@@ -103,3 +103,26 @@ describe("project index", () => {
     expect(names).not.toContain("Ghost");
   });
 });
+
+describe("project index file safety", () => {
+  it("returns an empty index when projects.json is truncated", async () => {
+    const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-index-corrupt-"));
+    await fs.mkdir(path.dirname(indexJsonPath(homeDir)), { recursive: true });
+    await fs.writeFile(indexJsonPath(homeDir), '{"schemaVersion":1,"proj', "utf-8");
+
+    const index = await readProjectIndex({ homeDir });
+
+    expect(index.projects).toEqual([]);
+  });
+
+  it("recovers from a truncated index on the next write and leaves no temp files", async () => {
+    const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-index-recover-"));
+    await fs.mkdir(path.dirname(indexJsonPath(homeDir)), { recursive: true });
+    await fs.writeFile(indexJsonPath(homeDir), "{", "utf-8");
+
+    await upsertIndexedProject(summary(), { homeDir });
+
+    expect((await readProjectIndex({ homeDir })).projects).toHaveLength(1);
+    expect((await fs.readdir(path.dirname(indexJsonPath(homeDir)))).sort()).toEqual(["projects.json"]);
+  });
+});
