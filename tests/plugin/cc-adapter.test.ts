@@ -6,6 +6,7 @@ import path from "node:path";
 import { handlePreCommit, handlePreEdit, handleSessionStart, handleStop, handleUserPromptSubmit, providerFromArgv, runHook } from "../../src/hook/cc-adapter.js";
 import { validateProgressFile } from "../../src/hook/validator.js";
 import { parseFrontmatter } from "../../src/mcp/markdown.js";
+import { replaceFrontmatterValue } from "../../src/mcp/writer.js";
 import { readProjectTrackingState, setProjectTrackingState } from "../../src/project-state.js";
 
 async function withTrackerHome(run: (home: string) => Promise<void>): Promise<void> {
@@ -1235,14 +1236,69 @@ describe("cc-adapter session handoff", () => {
     });
   });
 
-  it("still records a clean handoff outside a git repository", async () => {
+  it("records a clean handoff outside a git repository after Progress.md is updated", async () => {
     await withTrackerHome(async () => {
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-handoff-nogit-"));
       const file = await writeProgress(dir, progressDoc({ project: "Handoff7" }));
+      const sessionId = `sess-seven-${Date.now()}`;
 
-      await handleSessionStart({ cwd: dir, session_id: "sess-seven" });
-
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
       expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("interrupted");
+
+      const current = await fs.readFile(file, "utf-8");
+      await fs.writeFile(file, current.replace("Wire the widget.", "Wire the gadget."), "utf-8");
+      await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+    });
+  });
+
+  it("treats a moved HEAD as work even when the tree is clean", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      await writeProgress(dir, progressDoc({ project: "Handoff8" }));
+      await commitAll(dir, "init");
+      const sessionId = `sess-eight-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
+      await commitAll(dir, "work");
+
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+      expect(stop.code).toBe(2);
+      expect(stop.stderr).toContain("was not updated");
+    });
+  });
+
+  it("restores the handoff recorded at start when the session did no work", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      const file = await writeProgress(dir, progressDoc({ project: "Handoff9", handoff: "clean" }));
+      await commitAll(dir, "init");
+      const sessionId = `sess-nine-${Date.now()}`;
+
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("interrupted");
+
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+      expect(stop.code).toBe(0);
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+    });
+  });
+
+  it("does not overwrite a clean handoff another session recorded in the meantime", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      const file = await writeProgress(dir, progressDoc({ project: "Handoff10", handoff: "interrupted" }));
+      await commitAll(dir, "init");
+      const sessionId = `sess-ten-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      const markdown = await fs.readFile(file, "utf-8");
+      await fs.writeFile(file, replaceFrontmatterValue(markdown, "handoff", "clean"), "utf-8");
+
+      await handleStop({ cwd: dir, session_id: sessionId });
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
     });
   });
 });

@@ -70,10 +70,22 @@ async function writeSessionState(sessionId, state) {
     await fs.mkdir(sessionStateDir(), { recursive: true });
     await fs.writeFile(sessionStatePath(sessionId), JSON.stringify(state), "utf-8");
 }
+function currentHead(cwd) {
+    return git(cwd, ["rev-parse", "HEAD"])?.trim() || undefined;
+}
+async function readHandoff(progressPath) {
+    try {
+        const value = parseFrontmatter(await fs.readFile(progressPath, "utf-8")).handoff;
+        return typeof value === "string" ? value : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
 // Returns false when this start only repeats one already recorded: Claude Code re-runs SessionStart after
 // compaction (source "compact"), and that must not reset the baseline Stop compares Progress.md against.
 // Docs do not say whether session_id survives compaction; a new id simply gets a fresh baseline.
-async function recordSessionStart(sessionId, cwd, source) {
+async function recordSessionStart(sessionId, cwd, source, handoffAtStart) {
     if (!sessionId)
         return true;
     try {
@@ -82,7 +94,12 @@ async function recordSessionStart(sessionId, cwd, source) {
             if (existing.startedAt && existing.cwd === cwd)
                 return false;
         }
-        await writeSessionState(sessionId, { startedAt: new Date().toISOString(), cwd });
+        await writeSessionState(sessionId, {
+            startedAt: new Date().toISOString(),
+            cwd,
+            headAtStart: currentHead(cwd),
+            handoffAtStart
+        });
     }
     catch {
         // best effort only
@@ -271,8 +288,8 @@ async function bestEffortHealth(progressPath) {
 }
 export async function handleSessionStart(event) {
     const cwd = event.cwd ?? process.cwd();
-    const fresh = await recordSessionStart(event.session_id, cwd, event.source);
     const progressPath = progressPathFor(cwd);
+    const fresh = await recordSessionStart(event.session_id, cwd, event.source, await readHandoff(progressPath));
     if (!(await fileExists(progressPath))) {
         return await initializationGuidance(cwd, "SessionStart");
     }
@@ -432,19 +449,54 @@ export async function handlePreEdit(event) {
         })
     };
 }
+async function progressBodyChanged(progressPath, startHash) {
+    if (!startHash)
+        return false;
+    try {
+        return bodyHash(await fs.readFile(progressPath, "utf-8")) !== startHash;
+    }
+    catch {
+        return false;
+    }
+}
+// SessionStart marks the handoff interrupted. A session that did nothing puts back what was there, but only
+// while that mark is still this session's own: another session may have ended clean since.
+async function bestEffortRestoreHandoff(progressPath, state, sessionId) {
+    if (!sessionId || !state.handoffAtStart)
+        return;
+    try {
+        const markdown = await fs.readFile(progressPath, "utf-8");
+        const frontmatter = parseFrontmatter(markdown);
+        if (frontmatter.handoff !== "interrupted" || String(frontmatter.session_id) !== sessionId)
+            return;
+        if (state.handoffAtStart === "interrupted")
+            return;
+        await writeFileAtomic(progressPath, replaceFrontmatterValue(markdown, "handoff", state.handoffAtStart), sha256(markdown));
+    }
+    catch {
+        // best effort only
+    }
+}
 export async function handleStop(event, options = {}) {
     const { allowBlock = true } = options;
     const cwd = event.cwd ?? process.cwd();
     const progressPath = progressPathFor(cwd);
     if (!(await fileExists(progressPath)))
         return { code: 0 };
-    // Only nudge when the working tree shows activity, so projects that just read
-    // progress (or aren't git repos) are never nagged.
-    if (!gitHasChanges(cwd))
+    const sessionState = await readSessionState(event.session_id);
+    // Only nudge when the session did work, so read-only sessions are never nagged. Work is a dirty tree
+    // outside project-progress/ or a HEAD that moved since start (committed work leaves the tree clean). Without
+    // git there is no other evidence, so an edited Progress.md body counts there; in a git repo a progress-only
+    // edit is deliberately not meaningful work (ADR 0006).
+    const head = currentHead(cwd);
+    const headMoved = Boolean(sessionState.headAtStart && head && head !== sessionState.headAtStart);
+    const bodyChanged = !head && (await progressBodyChanged(progressPath, sessionState.bodyHash));
+    if (!gitHasChanges(cwd) && !headMoved && !bodyChanged) {
+        await bestEffortRestoreHandoff(progressPath, sessionState, event.session_id);
         return { code: 0 };
+    }
     const warnings = [];
     let stale = true;
-    const sessionState = await readSessionState(event.session_id);
     const startedAt = sessionState.startedAt ? Date.parse(sessionState.startedAt) : NaN;
     if (Number.isFinite(startedAt)) {
         try {
