@@ -13,6 +13,9 @@ export class ProgressConflictError extends Error {
         this.filePath = filePath;
     }
 }
+export function todayIso() {
+    return new Date().toISOString().slice(0, 10);
+}
 export const ALLOWED_PROGRESS_SECTIONS = [
     "Resume Snapshot",
     "Current State",
@@ -200,7 +203,7 @@ export function replaceFrontmatterValue(markdown, key, value) {
     const body = markdown.slice(frontmatterEnd);
     const keyPattern = new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:.*$`, "m");
     if (keyPattern.test(frontmatter)) {
-        return `${frontmatter.replace(keyPattern, replacement)}${body}`;
+        return `${frontmatter.replace(keyPattern, () => replacement)}${body}`;
     }
     return `${lines[0]}${replacement}\n${markdown.slice(lines[0].length)}`;
 }

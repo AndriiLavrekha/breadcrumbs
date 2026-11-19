@@ -16,6 +16,10 @@ export class ProgressConflictError extends Error {
   }
 }
 
+export function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 export const ALLOWED_PROGRESS_SECTIONS = [
   "Resume Snapshot",
   "Current State",

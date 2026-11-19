@@ -9,7 +9,7 @@ import { upsertIndexedProject } from "./mcp/index.js";
 import { main as runMcpServer } from "./mcp/server.js";
 import { sha256 } from "./hash.js";
 import { planCompaction, readProgressFiles, applyArchive } from "./compact.js";
-import { ProgressConflictError, updateArchiveFile, writeFileAtomic } from "./mcp/writer.js";
+import { ProgressConflictError, todayIso, updateArchiveFile, writeFileAtomic } from "./mcp/writer.js";
 import { PACKAGE_ROOT, PACKAGE_VERSION } from "./package.js";
 import {
   listProjectTrackingStates,
@@ -209,10 +209,6 @@ Aliases:
 Environment:
   PROJECT_PROGRESS_ROOTS  Semicolon-separated roots scanned by the MCP server.
 `;
-}
-
-function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
 }
 
 function inferProjectName(targetRoot: string): string {

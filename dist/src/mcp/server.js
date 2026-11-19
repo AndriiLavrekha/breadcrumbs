@@ -8,7 +8,7 @@ import { readProjectIndex, refreshProjectIndex, upsertIndexedProject } from "./i
 import { extractSection, parseFrontmatter, parseProjectSummary } from "./markdown.js";
 import { sha256 } from "../hash.js";
 import path from "node:path";
-import { ALLOWED_PROGRESS_SECTIONS, MAX_LAST_MILESTONE_LENGTH, MAX_SECTION_CONTENT_LENGTH, appendToArchive, foldDoneSection, replaceFrontmatterValue, replaceSectionWithOperation, updateArchiveFile, writeFileAtomic, ProgressConflictError, validateLastMilestone, validateSectionContent, validateSectionName } from "./writer.js";
+import { ALLOWED_PROGRESS_SECTIONS, MAX_LAST_MILESTONE_LENGTH, MAX_SECTION_CONTENT_LENGTH, appendToArchive, foldDoneSection, replaceFrontmatterValue, replaceSectionWithOperation, updateArchiveFile, writeFileAtomic, ProgressConflictError, validateLastMilestone, validateSectionContent, validateSectionName, todayIso } from "./writer.js";
 import { listProjectTrackingStates, resetProjectTrackingState } from "../project-state.js";
 import { ALLOWED_GATE_VALUES, GATE_KEYS } from "../hook/schema.js";
 import { PACKAGE_VERSION } from "../package.js";
@@ -145,13 +145,6 @@ async function resolveLiteralProgressPath(selector) {
 export async function resolveProject(selector) {
     const index = await readProjectIndex();
     let candidates = dedupeByProgressPath(index.projects.filter((project) => matchesSelector(project, selector)));
-    if (candidates.length === 0) {
-        const discovered = await discoverProjects({
-            projectRoots: rootsFromEnv(),
-            exclude: DEFAULT_EXCLUDES
-        });
-        candidates = dedupeByProgressPath(discovered.filter((project) => matchesSelector(project, selector)));
-    }
     // Checkouts outside PROJECT_PROGRESS_ROOTS (a fresh clone, a benchmark fixture, a temp
     // worktree) are invisible to root scanning by design. If the caller named an exact path to
     // one, honor it directly instead of forcing a re-install just to move Progress.md.
@@ -162,6 +155,17 @@ export async function resolveProject(selector) {
             const project = parseProjectSummary(markdown, literalPath);
             await upsertIndexedProject(project);
             candidates = [project];
+        }
+    }
+    if (candidates.length === 0) {
+        const discovered = await discoverProjects({
+            projectRoots: rootsFromEnv(),
+            exclude: DEFAULT_EXCLUDES
+        });
+        candidates = dedupeByProgressPath(discovered.filter((project) => matchesSelector(project, selector)));
+        // Remember what the walk found so the next call does not repeat it.
+        for (const project of candidates) {
+            await upsertIndexedProject(project).catch(() => undefined);
         }
     }
     if (candidates.length === 0) {
@@ -308,7 +312,15 @@ export function createServer() {
         const resolution = await resolveProject(project);
         if (resolution.error)
             return textResult(JSON.stringify({ error: resolution.error }));
-        return textResult(JSON.stringify(boundProjectSummaries([resolution.project])[0]));
+        // The index is a cache that only MCP writes refresh; resuming from it would hide hand edits to Progress.md.
+        let current;
+        try {
+            current = parseProjectSummary(await fs.readFile(resolution.project.progressPath, "utf-8"), resolution.project.progressPath);
+        }
+        catch {
+            return errorResult("read_failed", `Could not read ${resolution.project.progressPath}.`, "Check that the file exists, or run refresh_projects.");
+        }
+        return textResult(JSON.stringify(boundProjectSummaries([current])[0]));
     });
     server.registerTool("update_project_progress", {
         description: "Replace or append a named section in a project's Progress.md.",
@@ -338,7 +350,7 @@ export function createServer() {
             archived = fold.archived;
         }
         const result = replaceSectionWithOperation(markdown, section, sectionContent);
-        const updated = result.markdown;
+        const updated = replaceFrontmatterValue(result.markdown, "updated", todayIso());
         try {
             await writeFileAtomic(match.progressPath, updated, expectedHash);
         }
@@ -377,7 +389,7 @@ export function createServer() {
         const markdown = await fs.readFile(match.progressPath, "utf-8");
         const expectedHash = sha256(markdown);
         const withStatus = replaceFrontmatterValue(markdown, "status", status);
-        const updated = replaceFrontmatterValue(withStatus, "last_milestone", last_milestone);
+        const updated = replaceFrontmatterValue(replaceFrontmatterValue(withStatus, "last_milestone", last_milestone), "updated", todayIso());
         try {
             await writeFileAtomic(match.progressPath, updated, expectedHash);
         }
@@ -413,6 +425,7 @@ export function createServer() {
         for (const [key, value] of updates) {
             updated = replaceFrontmatterValue(updated, key, value);
         }
+        updated = replaceFrontmatterValue(updated, "updated", todayIso());
         try {
             await writeFileAtomic(match.progressPath, updated, expectedHash);
         }

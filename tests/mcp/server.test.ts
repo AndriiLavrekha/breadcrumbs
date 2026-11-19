@@ -23,7 +23,7 @@ import {
   successResult,
   toolDefinitions
 } from "../../src/mcp/server.js";
-import { writeProjectIndex } from "../../src/mcp/index.js";
+import { readProjectIndex, writeProjectIndex } from "../../src/mcp/index.js";
 import type { ProjectSummary } from "../../src/mcp/schema.js";
 import { replaceFrontmatterValue } from "../../src/mcp/writer.js";
 import { parseFrontmatter } from "../../src/mcp/markdown.js";
@@ -536,5 +536,80 @@ describe("archiveFoldedItems", () => {
     expect(result.unarchivedItems).toEqual(["- [x] old"]);
     expect(result.archiveError).toBeTruthy();
     expect(result.archiveHint).toContain("Progress.md is saved");
+  });
+});
+
+describe("MCP server file-backed tools", () => {
+  const today = () => new Date().toISOString().slice(0, 10);
+
+  async function callTool(name: string, args: Record<string, unknown>) {
+    const server = createServer();
+    const client = new Client({ name: "file-backed-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      return await client.callTool({ name, arguments: args });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+
+  async function projectOnDisk(root?: string): Promise<{ dir: string; file: string; summary: ProjectSummary }> {
+    const dir = await fs.mkdtemp(path.join(root ?? os.tmpdir(), "pp-mcp-file-"));
+    const file = path.join(dir, "project-progress", "Progress.md");
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const sections = ["Resume Snapshot", "Current State", "Last Session", "Next Action", "Remaining Work", "Done", "Blockers", "Deployment", "Completion Criteria", "Resume Instructions"];
+    const body = sections.map((section) => `## ${section}\n\n${section === "Next Action" ? "Old action" : "None."}\n`).join("\n");
+    const frontmatter = ["project: FileDemo", "progress_schema_version: 1", "status: active", `path: ${dir.replace(/\\/g, "/")}`, "updated: 2020-01-01", "last_milestone: started", "deployed: false", "deployment_url: ", "sensitivity: normal", "commit_progress: true"].join("\n");
+    await fs.writeFile(file, `---\n${frontmatter}\n---\n\n${body}`, "utf-8");
+    return { dir, file, summary: indexSummary({ project: "FileDemo", path: dir, progressPath: file, nextAction: "Old action" }) };
+  }
+
+  it("read_project_progress returns the current file, not the indexed copy", async () => {
+    const { file, summary } = await projectOnDisk();
+    await withIndex([summary], async () => {
+      const markdown = await fs.readFile(file, "utf-8");
+      await fs.writeFile(file, markdown.replace("Old action", "New action"), "utf-8");
+
+      const result = await callTool("read_project_progress", { project: "FileDemo" });
+
+      expect(result.isError).toBe(false);
+      expect(result.structuredContent).toMatchObject({ nextAction: "New action" });
+    });
+  });
+
+  it("update_project_progress, mark_project_status and set_project_gates set updated to today", async () => {
+    const { file, summary } = await projectOnDisk();
+    await withIndex([summary], async () => {
+      const calls: Array<[string, Record<string, unknown>]> = [
+        ["update_project_progress", { project: "FileDemo", section: "Next Action", content: "Next." }],
+        ["mark_project_status", { project: "FileDemo", status: "paused", last_milestone: "paused for now" }],
+        ["set_project_gates", { project: "FileDemo", implementation: "done" }]
+      ];
+      for (const [name, args] of calls) {
+        const markdown = await fs.readFile(file, "utf-8");
+        await fs.writeFile(file, replaceFrontmatterValue(markdown, "updated", "2020-01-01"), "utf-8");
+
+        const result = await callTool(name, args);
+
+        expect(result.isError, name).toBe(false);
+        expect(parseFrontmatter(await fs.readFile(file, "utf-8")).updated, name).toBe(today());
+      }
+    });
+  });
+
+  it("resolveProject saves projects found by scanning roots", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "pp-mcp-root-"));
+    const { summary } = await projectOnDisk(root);
+    await withIndex([], async () => {
+      process.env.PROJECT_PROGRESS_ROOTS = root;
+
+      const resolution = await resolveProject(summary.project);
+
+      expect(resolution.error).toBeUndefined();
+      expect((await readProjectIndex()).projects.map((project) => project.progressPath)).toContain(resolution.project!.progressPath);
+    });
   });
 });
