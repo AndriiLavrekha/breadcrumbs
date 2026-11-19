@@ -109,6 +109,23 @@ async function writeSessionState(sessionId: string, state: SessionState): Promis
   await fs.writeFile(sessionStatePath(sessionId), JSON.stringify(state), "utf-8");
 }
 
+const SESSION_STATE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+// Nothing else deletes these files and Windows does not clean %TEMP% by itself.
+async function pruneSessionState(now: number = Date.now()): Promise<void> {
+  try {
+    const dir = sessionStateDir();
+    for (const name of await fs.readdir(dir)) {
+      if (!name.endsWith(".json")) continue;
+      const file = path.join(dir, name);
+      const { mtimeMs } = await fs.stat(file);
+      if (now - mtimeMs > SESSION_STATE_MAX_AGE_MS) await fs.rm(file, { force: true });
+    }
+  } catch {
+    // best effort only
+  }
+}
+
 function currentHead(cwd: string): string | undefined {
   return git(cwd, ["rev-parse", "HEAD"])?.trim() || undefined;
 }
@@ -357,6 +374,7 @@ async function bestEffortHealth(progressPath: string): Promise<HealthFinding[]> 
 export async function handleSessionStart(event: HookEvent): Promise<HookResult> {
   const cwd = event.cwd ?? process.cwd();
   const progressPath = progressPathFor(cwd);
+  await pruneSessionState();
   const fresh = await recordSessionStart(event.session_id, cwd, event.source, await readHandoff(progressPath));
 
   if (!(await fileExists(progressPath))) {

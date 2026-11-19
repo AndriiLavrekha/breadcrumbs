@@ -1303,6 +1303,28 @@ describe("cc-adapter session handoff", () => {
   });
 });
 
+describe("cc-adapter session state cleanup", () => {
+  it("removes session state files older than 30 days at SessionStart", async () => {
+    await withTrackerHome(async () => {
+      const sessionsDir = path.join(os.tmpdir(), "awesome-progress-tracker", "sessions");
+      await fs.mkdir(sessionsDir, { recursive: true });
+      const oldFile = path.join(sessionsDir, `old-${Date.now()}.json`);
+      const recentFile = path.join(sessionsDir, `recent-${Date.now()}.json`);
+      await fs.writeFile(oldFile, "{}", "utf-8");
+      await fs.writeFile(recentFile, "{}", "utf-8");
+      const longAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+      await fs.utimes(oldFile, longAgo, longAgo);
+
+      const dir = await makeRepo();
+      await handleSessionStart({ cwd: dir, session_id: `sess-prune-${Date.now()}`, source: "startup" });
+      await handleSessionStart({ cwd: dir, session_id: `sess-prune-b-${Date.now()}`, source: "compact" });
+
+      await expect(fs.access(oldFile)).rejects.toThrow();
+      await expect(fs.access(recentFile)).resolves.toBeUndefined();
+    });
+  });
+});
+
 describe("cc-adapter session baseline", () => {
   async function startedRepoWithEdit(sessionId: string): Promise<{ dir: string; file: string }> {
     const dir = await makeRepo();
