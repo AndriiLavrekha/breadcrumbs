@@ -1157,10 +1157,68 @@ describe("npm CLI", () => {
     expect(await listStateEntries({ homeDir: home })).toEqual([]);
   });
 
+  it("init without force creates only the missing files and keeps existing ones", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "project-progress-"));
+    await initProject({ cwd: tmp, projectName: "Demo Project" });
+    const dir = path.join(tmp, "project-progress");
+    await fs.rm(path.join(dir, "Progress.md"));
+    await fs.writeFile(path.join(dir, "Session Log.md"), "precious history", "utf-8");
+
+    const result = await initProject({ cwd: tmp, projectName: "Demo Project" });
+
+    expect(result.createdFiles.map((file) => path.basename(file))).toEqual(["Progress.md"]);
+    expect(await fs.readFile(path.join(dir, "Session Log.md"), "utf-8")).toBe("precious history");
+  });
+
+  it("init with force overwrites every template file", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "project-progress-"));
+    await initProject({ cwd: tmp, projectName: "Demo Project" });
+    const log = path.join(tmp, "project-progress", "Session Log.md");
+    await fs.writeFile(log, "scratch", "utf-8");
+
+    await initProject({ cwd: tmp, projectName: "Demo Project", force: true });
+
+    expect(await fs.readFile(log, "utf-8")).not.toBe("scratch");
+  });
+
   it("refuses to overwrite an existing progress folder without force", async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "project-progress-"));
     await initProject({ cwd: tmp, projectName: "Demo Project" });
 
     await expect(initProject({ cwd: tmp, projectName: "Demo Project" })).rejects.toThrow(/already exists/);
+  });
+});
+
+describe("doctor index check", () => {
+  const runner = async () => ({ stdout: "NAME STATUS\n", stderr: "" });
+
+  async function indexCheckWithHome(trackerHome: string) {
+    const previous = process.env.AWESOME_PROGRESS_TRACKER_HOME;
+    process.env.AWESOME_PROGRESS_TRACKER_HOME = trackerHome;
+    try {
+      const result = await runDoctor({ agent: "hermes", commandRunner: runner });
+      return result.checks.find((check) => check.name === "index")!;
+    } finally {
+      if (previous === undefined) delete process.env.AWESOME_PROGRESS_TRACKER_HOME;
+      else process.env.AWESOME_PROGRESS_TRACKER_HOME = previous;
+    }
+  }
+
+  it("checks the folder the index really uses when AWESOME_PROGRESS_TRACKER_HOME is set", async () => {
+    const trackerHome = await fs.mkdtemp(path.join(os.tmpdir(), "breadcrumbs-doctor-home-"));
+
+    const check = await indexCheckWithHome(trackerHome);
+
+    expect(check.ok).toBe(true);
+    expect(check.message).toContain(path.join(trackerHome, ".awesome-progress-tracker"));
+  });
+
+  it("fails when the index folder cannot be created", async () => {
+    const blocker = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "breadcrumbs-doctor-blocked-")), "file");
+    await fs.writeFile(blocker, "not a directory", "utf-8");
+
+    const check = await indexCheckWithHome(blocker);
+
+    expect(check.ok).toBe(false);
   });
 });
