@@ -75,20 +75,6 @@ Ask: `Use Breadcrumbs MCP to update the Next Action for project <project name> t
 
 **Broken if:** MCP updates the wrong project, or the Markdown and index fall out of sync in either direction.
 
-## Scenario 6: Hook Check
-
-```powershell
-# Windows
-./hooks/project-progress-check.ps1 -ProjectRoot . -SessionStartedAt 2026-06-28T00:00:00+00:00 -MeaningfulWork -CompletionBoundary
-```
-
-```bash
-# POSIX
-./hooks/project-progress-check.sh --project-root . --session-started-at 2026-06-28T00:00:00+00:00 --meaningful-work --completion-boundary
-```
-
-**Expected:** exit `0` when progress is valid/current; nonzero when required files are missing at a completion boundary; warnings/failures for stale progress after meaningful work.
-
 ## Scenario 6A: Codex SessionStart Hook Smoke
 
 After `npm run build`, run the adapter directly with JSON input:

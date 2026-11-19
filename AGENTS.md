@@ -12,7 +12,7 @@ The TypeScript implementation is in `src/`: `cli.ts` provides the package CLI, `
 - `npm run test:mcp` runs only MCP tests while iterating on server behavior.
 - `npm run typecheck` checks source and tests without producing a release artifact.
 
-Use `npm run mcp` or `npm run hook` only after building when manually exercising compiled entry points.
+Use `npm run mcp` only after building when manually exercising compiled entry points.
 
 ## Coding Style & Naming Conventions
 

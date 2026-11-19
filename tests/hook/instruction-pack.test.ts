@@ -179,9 +179,7 @@ describe("instruction pack", () => {
       "final response",
       "commit",
       "PR",
-      "deploy",
-      "hooks/project-progress-check.ps1",
-      "hooks/project-progress-check.sh"
+      "deploy"
     ]);
   });
 });

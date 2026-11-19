@@ -264,24 +264,6 @@ Agents should update progress at kickoff when state changes, after milestones, w
 
 </details>
 
-<details>
-<summary><strong>Hook Check — run the lifecycle hook manually</strong></summary>
-<br>
-
-```powershell
-# Windows
-./hooks/project-progress-check.ps1 -ProjectRoot . -SessionStartedAt 2026-06-27T00:00:00+00:00 -MeaningfulWork -CompletionBoundary
-```
-
-```bash
-# POSIX
-./hooks/project-progress-check.sh --project-root . --session-started-at 2026-06-27T00:00:00+00:00 --meaningful-work --completion-boundary
-```
-
-These wrappers run the compiled hook (`dist/src/hook/cli.js`) on Node — run `npm run build` first (or install the published package, which builds on `prepare`). For direct use: `node dist/src/hook/cli.js --project-root . --session-started-at <iso>`.
-
-</details>
-
 ## Keep Progress Files Small
 
 Hooks report when progress files grow: session start shows a `Progress health:` line and the stop hook lists problems once per session. `compact` moves old history into `Archive.md` verbatim apart from heading levels:
@@ -320,7 +302,7 @@ For local development in this repo:
 
 ```bash
 npm install
-npm run build:mcp
+npm run build
 node dist/src/mcp/server.js
 ```
 
@@ -356,12 +338,6 @@ Verify package creation and npx-style execution locally:
 ```bash
 PACKAGE_TGZ="$(npm pack --silent)"
 npx --yes --package="./$PACKAGE_TGZ" breadcrumbs help
-```
-
-Run the lifecycle check against this repo:
-
-```powershell
-./hooks/project-progress-check.ps1 -ProjectRoot . -SessionStartedAt 2026-06-27T00:00:00+00:00 -MeaningfulWork -CompletionBoundary
 ```
 
 </details>
