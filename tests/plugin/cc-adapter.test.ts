@@ -1247,6 +1247,48 @@ describe("cc-adapter session handoff", () => {
   });
 });
 
+describe("cc-adapter session baseline", () => {
+  async function startedRepoWithEdit(sessionId: string): Promise<{ dir: string; file: string }> {
+    const dir = await makeRepo();
+    const file = await writeProgress(dir, progressDoc({ project: "Baseline" }));
+    await commitAll(dir, "init");
+    await handleSessionStart({ cwd: dir, session_id: sessionId, source: "startup" });
+    await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
+    const current = await fs.readFile(file, "utf-8");
+    await fs.writeFile(file, current.replace("Wire the widget.", "Wire the gadget."), "utf-8");
+    return { dir, file };
+  }
+
+  it("keeps the first baseline when SessionStart fires again after compaction", async () => {
+    await withTrackerHome(async () => {
+      const sessionId = `sess-compact-${Date.now()}`;
+      const { dir, file } = await startedRepoWithEdit(sessionId);
+
+      const restart = await handleSessionStart({ cwd: dir, session_id: sessionId, source: "compact" });
+      expect(restart.stdout).toContain("Wire the gadget.");
+      expect(restart.stdout).not.toContain("ended without a clean handoff");
+
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+      expect(stop.code).toBe(0);
+      expect(stop.stdout ?? "").not.toContain("was not updated");
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+    });
+  });
+
+  it("starts a fresh baseline when the session is resumed, not compacted", async () => {
+    await withTrackerHome(async () => {
+      const sessionId = `sess-resume-${Date.now()}`;
+      const { dir } = await startedRepoWithEdit(sessionId);
+
+      await handleSessionStart({ cwd: dir, session_id: sessionId, source: "resume" });
+
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+      expect(stop.code).toBe(2);
+      expect(stop.stderr).toContain("was not updated");
+    });
+  });
+});
+
 describe("cc-adapter last runtime", () => {
   it("injects the runtime line after the project status and before the snapshot", async () => {
     await withTrackerHome(async () => {

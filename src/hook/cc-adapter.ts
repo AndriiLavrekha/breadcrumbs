@@ -106,13 +106,21 @@ async function writeSessionState(sessionId: string, state: SessionState): Promis
   await fs.writeFile(sessionStatePath(sessionId), JSON.stringify(state), "utf-8");
 }
 
-async function recordSessionStart(sessionId: string | undefined, cwd: string): Promise<void> {
-  if (!sessionId) return;
+// Returns false when this start only repeats one already recorded: Claude Code re-runs SessionStart after
+// compaction (source "compact"), and that must not reset the baseline Stop compares Progress.md against.
+// Docs do not say whether session_id survives compaction; a new id simply gets a fresh baseline.
+async function recordSessionStart(sessionId: string | undefined, cwd: string, source?: string): Promise<boolean> {
+  if (!sessionId) return true;
   try {
+    if (source === "compact") {
+      const existing = await readSessionState(sessionId);
+      if (existing.startedAt && existing.cwd === cwd) return false;
+    }
     await writeSessionState(sessionId, { startedAt: new Date().toISOString(), cwd });
   } catch {
     // best effort only
   }
+  return true;
 }
 
 async function bestEffortRecordBodyHash(sessionId: string | undefined, markdown: string): Promise<void> {
@@ -322,7 +330,7 @@ async function bestEffortHealth(progressPath: string): Promise<HealthFinding[]> 
 
 export async function handleSessionStart(event: HookEvent): Promise<HookResult> {
   const cwd = event.cwd ?? process.cwd();
-  await recordSessionStart(event.session_id, cwd);
+  const fresh = await recordSessionStart(event.session_id, cwd, event.source);
 
   const progressPath = progressPathFor(cwd);
   if (!(await fileExists(progressPath))) {
@@ -332,7 +340,7 @@ export async function handleSessionStart(event: HookEvent): Promise<HookResult> 
   await bestEffortSetProjectState(cwd, "initialized");
 
   const markdown = await fs.readFile(progressPath, "utf-8");
-  await bestEffortRecordBodyHash(event.session_id, markdown);
+  if (fresh) await bestEffortRecordBodyHash(event.session_id, markdown);
   const frontmatter = parseFrontmatter(markdown);
 
   const lines: string[] = [
@@ -367,7 +375,9 @@ export async function handleSessionStart(event: HookEvent): Promise<HookResult> 
     }
   }
 
-  if (frontmatter.handoff === "interrupted") {
+  // After compaction the interrupted mark is this very session's own, not a predecessor's.
+  const ownMark = !fresh && frontmatter.session_id === event.session_id;
+  if (frontmatter.handoff === "interrupted" && !ownMark) {
     const previous = frontmatter.session_id ? String(frontmatter.session_id) : "(unknown)";
     lines.push(
       `\nPrevious session ${previous} ended without a clean handoff. ` +
@@ -387,7 +397,7 @@ export async function handleSessionStart(event: HookEvent): Promise<HookResult> 
   const gates = renderGates(frontmatter);
   if (gates) lines.push(`\n${gates}`);
 
-  await bestEffortMarkHandoff(progressPath, "interrupted", event.session_id);
+  if (fresh) await bestEffortMarkHandoff(progressPath, "interrupted", event.session_id);
 
   return {
     code: 0,
