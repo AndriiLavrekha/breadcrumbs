@@ -33,6 +33,24 @@ async function pathExists(filePath: string): Promise<boolean> {
   }
 }
 
+async function siblingMarkdown(progressPath: string): Promise<string> {
+  const dir = path.dirname(progressPath);
+  let text = "";
+  try {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".md") || entry.name === path.basename(progressPath)) continue;
+      try {
+        text += "\n" + (await fs.readFile(path.join(dir, entry.name), "utf-8"));
+      } catch {
+        // an unreadable sibling is skipped, it must not hide the Progress.md result
+      }
+    }
+  } catch {
+    // directory unreadable: scan Progress.md only
+  }
+  return text;
+}
+
 export async function validateProgressFile(progressPath: string): Promise<string[]> {
   if (!(await pathExists(progressPath))) {
     return [`Progress file not found: ${progressPath}`];
@@ -46,8 +64,10 @@ export async function validateProgressFile(progressPath: string): Promise<string
     errors.push(`Missing required section: ${section}`);
   }
 
+  // Agents write secrets into the log, tasks and decisions as readily as into Progress.md.
+  const secretScope = markdown + (await siblingMarkdown(progressPath));
   for (const [label, pattern] of SECRET_PATTERNS) {
-    if (pattern.test(markdown)) {
+    if (pattern.test(secretScope)) {
       errors.push(`Found secret-like value: ${label}`);
     }
   }

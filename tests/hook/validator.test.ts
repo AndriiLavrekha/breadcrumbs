@@ -24,6 +24,34 @@ describe("validateProgressFile", () => {
     expect(errors.some((error) => error.includes("secret-like"))).toBe(true);
   });
 
+  it("flags secret-like values in the other progress markdown files", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-validator-secret-"));
+    const validDir = "tests/fixtures/valid-project/project-progress";
+    for (const name of await fs.readdir(validDir)) {
+      await fs.copyFile(path.join(validDir, name), path.join(dir, name));
+    }
+    const file = path.join(dir, "Progress.md");
+    expect(await validateProgressFile(file)).toEqual([]);
+
+    await fs.writeFile(path.join(dir, "Session Log.md"), "## Log\n\npassword = hunter2pass\n", "utf-8");
+
+    expect(await validateProgressFile(file)).toEqual(["Found secret-like value: generic password assignment"]);
+  });
+
+  it("reports one error per secret kind even when several files contain it", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-validator-secret2-"));
+    const validDir = "tests/fixtures/valid-project/project-progress";
+    for (const name of await fs.readdir(validDir)) {
+      await fs.copyFile(path.join(validDir, name), path.join(dir, name));
+    }
+    await fs.appendFile(path.join(dir, "Progress.md"), "\npassword: one\n", "utf-8");
+    await fs.writeFile(path.join(dir, "Tasks.md"), "password: two\n", "utf-8");
+
+    const errors = await validateProgressFile(path.join(dir, "Progress.md"));
+
+    expect(errors.filter((error) => error.includes("generic password assignment"))).toHaveLength(1);
+  });
+
   it("reports when the progress file is missing", async () => {
     const errors = await validateProgressFile("tests/fixtures/does-not-exist/Progress.md");
     expect(errors[0]).toContain("Progress file not found");
