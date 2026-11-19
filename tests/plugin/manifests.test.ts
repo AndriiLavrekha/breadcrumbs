@@ -198,3 +198,12 @@ describe("Codex plugin manifests", () => {
     expect(commands.filter((command) => command.includes("session-start")).every((command) => !command.includes("--provider"))).toBe(true);
   });
 });
+
+describe("package dependency ranges", () => {
+  it("never uses the latest tag, which npm resolves ignoring the lockfile for installed packages", async () => {
+    const pkg = await readJson("package.json");
+    const ranges = { ...pkg.dependencies, ...pkg.devDependencies };
+
+    expect(Object.entries(ranges).filter(([, range]) => range === "latest")).toEqual([]);
+  });
+});
