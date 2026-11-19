@@ -342,6 +342,62 @@ describe("cc-adapter pre-commit guard", () => {
     expect(result.stdout).toBeUndefined();
   });
 
+  it("examines every git add in the command, not only the first", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({
+      cwd: dir,
+      tool_input: { command: "git add src/x.ts && git add -A && git commit -m x" }
+    });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("keeps quoted text together so a semicolon in the message does not hide -a", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: 'git commit -m "wip; more" -a' } });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it.each([
+    "if git commit -am x; then echo ok; fi",
+    "time git commit -am x",
+    "sudo git commit -am x",
+    'git -C "C:/My Dir" commit -a -m x',
+    "GIT_AUTHOR_NAME=me git commit --all -m x",
+    "git add src && git commit -m x .",
+    'git add "*.md" && git commit -m x'
+  ])("denies the wrapped or unusual form: %s", async (command) => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command } });
+    expect(decision(result), command).toBe("deny");
+  });
+
+  it.each([
+    "git commit -mrefactor",
+    "git commit -ma",
+    "git commit -m 'feat: add -a support'",
+    "git commit -m 'notes about project-progress handling'",
+    "git commit -m \"$(cat <<'EOF'\nsubject\n\ngit add .\nthen git add -A\nEOF\n)\""
+  ])("does not deny the ordinary commit: %s", async (command) => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command } });
+    expect(result.stdout, command).toBeUndefined();
+  });
+
+  it("still denies a staged restricted progress file for forms the strict classifier does not recognise", async () => {
+    const dir = await makeRepo();
+    await writeProgress(dir, progressDoc({ sensitivity: "sensitive" }));
+    execFileSync("git", ["add", "project-progress/Progress.md"], { cwd: dir, stdio: "ignore" });
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: 'bash -c "git commit -m x"' } });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("does not deny an unrecognised form when git cannot be inspected", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-cc-nogit-"));
+    await writeProgress(dir, progressDoc({ sensitivity: "sensitive" }));
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: 'bash -c "git commit -m x"' } });
+    expect(result.stdout).toBeUndefined();
+  });
+
   it("allows git commit -a when only untracked progress exists", async () => {
     const dir = await makeRepo();
     await writeProgress(dir, progressDoc({ commit_progress: "false" }));
@@ -1286,6 +1342,39 @@ describe("cc-adapter session handoff", () => {
     });
   });
 
+  it("restores clean for a project whose Progress.md has no handoff key", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      const file = await writeProgress(dir, progressDoc({ project: "Handoff11" }));
+      await commitAll(dir, "init");
+      const sessionId = `sess-eleven-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+    });
+  });
+
+  it("marks the handoff interrupted again when unrecorded work follows a read-only turn", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      const file = await writeProgress(dir, progressDoc({ project: "Handoff12", handoff: "clean" }));
+      await commitAll(dir, "init");
+      const sessionId = `sess-twelve-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      await handleStop({ cwd: dir, session_id: sessionId });
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
+      const second = await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(second.code).toBe(2);
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("interrupted");
+    });
+  });
+
   it("does not overwrite a clean handoff another session recorded in the meantime", async () => {
     await withTrackerHome(async () => {
       const dir = await makeRepo();
@@ -1560,7 +1649,8 @@ describe("cc-adapter last runtime", () => {
       expect(stale.frontmatter.provider_last_used).toBe("unknown");
 
       const progressOnly = await freshStop({ provider_last_used: "unknown" }, "claude-code", true, false);
-      expect(progressOnly.frontmatter.handoff).toBe("interrupted");
+      // No work beyond progress files: nothing to stamp, and the start-of-session interrupted mark is put back.
+      expect(progressOnly.frontmatter.handoff).toBe("clean");
       expect(progressOnly.frontmatter.provider_last_used).toBe("unknown");
     });
   });

@@ -11,6 +11,7 @@ import { readProjectTrackingState, setProjectTrackingState } from "../project-st
 import { defaultGitRunner as git, readCheckpoint, resolveDrift } from "./checkpoint.js";
 import { renderDrift, renderGates } from "./checkpoint-render.js";
 import { checkFreshness } from "./freshness.js";
+import { analyzeGitCommand } from "./git-command.js";
 import { checkProgressHealth, summarizeProblems, validateProgressFile } from "./validator.js";
 async function initializationGuidance(cwd, hookEventName) {
     const progressPath = progressPathFor(cwd);
@@ -246,31 +247,6 @@ function stagedFiles(cwd) {
         .map((line) => line.trim())
         .filter((line) => line.length > 0);
 }
-// Matches `git [-C path] [-c k=v] <subcommand>` only where a command starts (line start, after ; & | ( or
-// then/do, after env assignments), so `git log --grep commit` and `echo "git commit later"` never match.
-// Returns the rest of that shell segment, i.e. the subcommand's arguments, or null.
-function gitSubcommandArguments(command, subcommand) {
-    const pattern = new RegExp(String.raw `(?:^|[;&|(\n]|\b(?:then|do)\b)\s*(?:\w+=\S*\s+)*git(?:\s+(?:-C\s+\S+|-c\s+\S+|--[\w-]+(?:=\S+)?))*\s+${subcommand}(?![\w-])([^;&|\n]*)`);
-    const match = pattern.exec(command);
-    return match ? match[1] : null;
-}
-function unquote(token) {
-    return token.replace(/^["']|["']$/g, "");
-}
-function tokens(args) {
-    return args.split(/\s+/).map(unquote).filter((token) => token.length > 0);
-}
-function namesProgressPath(args) {
-    return tokens(args).some((token) => token.replace(/\\/g, "/").includes("project-progress"));
-}
-// `-a`, `--all`, or a short-flag group containing `a` (`-am`). Message text is a separate token, so "fix a bug" never matches.
-function commitStagesTracked(args) {
-    return tokens(args).some((token) => token === "--all" || /^-[A-Za-z]*a[A-Za-z]*$/.test(token));
-}
-// shortcut: pathspec magic other than the forms below (e.g. `:(glob)**`) is not recognised, extend if seen in the wild.
-function addIsBroad(args) {
-    return tokens(args).some((token) => [".", "./", ":/", "*", "--all", "--update"].includes(token) || /^-[A-Za-z]*[Au][A-Za-z]*$/.test(token));
-}
 function emitJson(value) {
     return JSON.stringify(value);
 }
@@ -303,7 +279,7 @@ export async function handleSessionStart(event) {
     const cwd = event.cwd ?? process.cwd();
     const progressPath = progressPathFor(cwd);
     await pruneSessionState();
-    const fresh = await recordSessionStart(event.session_id, cwd, event.source, await readHandoff(progressPath));
+    const fresh = await recordSessionStart(event.session_id, cwd, event.source, (await readHandoff(progressPath)) ?? "clean");
     if (!(await pathExists(progressPath))) {
         return await initializationGuidance(cwd, "SessionStart");
     }
@@ -389,11 +365,15 @@ function denyCommit(reason) {
         })
     };
 }
+// Loose gate, kept from before the strict classifier: it only ever gates the staged-files check, which denies
+// real staged progress files and nothing else, so it cannot conflict with ADR 0009's "confidently classified" rule.
+const LOOSE_COMMIT = /\bgit\b[\s\S]*\bcommit\b(?![\w-])/;
 export async function handlePreCommit(event) {
     const cwd = event.cwd ?? process.cwd();
     const command = event.tool_input?.command ?? "";
-    const commitArgs = gitSubcommandArguments(command, "commit");
-    if (commitArgs === null)
+    const { commits, adds } = analyzeGitCommand(command);
+    const strict = commits.length > 0;
+    if (!strict && !LOOSE_COMMIT.test(command))
         return { code: 0 };
     const progressPath = progressPathFor(cwd);
     if (!(await pathExists(progressPath)))
@@ -410,16 +390,17 @@ export async function handlePreCommit(event) {
             "Fix the repository state or change the policy in Progress.md, then retry the commit.";
         const staged = stagedFiles(cwd);
         if (staged === null)
-            return denyCommit(cannotInspect);
+            return strict ? denyCommit(cannotInspect) : { code: 0 };
         if (staged.some((file) => file.replace(/\\/g, "/").includes("project-progress/"))) {
             return denyCommit(`project-progress files are staged but Progress.md declares ${why}. ` +
                 "Unstage them with `git restore --staged project-progress/` before committing, " +
                 "or change the policy in Progress.md if sharing is intended.");
         }
+        if (!strict)
+            return { code: 0 };
         // Nothing is staged yet, but this same command may stage the progress files itself.
-        const addArgs = gitSubcommandArguments(command, "add");
-        const stagesEverything = (addArgs !== null && (addIsBroad(addArgs) || namesProgressPath(addArgs))) || namesProgressPath(commitArgs);
-        const stagesTracked = commitStagesTracked(commitArgs);
+        const stagesEverything = adds.some((add) => add.broad || add.namesProgress) || commits.some((commit) => commit.namesProgress);
+        const stagesTracked = commits.some((commit) => commit.stagesTracked || commit.broadPathspec);
         if (stagesEverything || stagesTracked) {
             const porcelain = git(cwd, ["status", "--porcelain", "--", "project-progress"]);
             if (porcelain === null)
@@ -435,8 +416,10 @@ export async function handlePreCommit(event) {
         return { code: 0 };
     }
     catch {
-        return denyCommit("Breadcrumbs could not verify whether project-progress files would be committed. " +
-            "Check that Progress.md is readable, then retry.");
+        return strict
+            ? denyCommit("Breadcrumbs could not verify whether project-progress files would be committed. " +
+                "Check that Progress.md is readable, then retry.")
+            : { code: 0 };
     }
 }
 export async function handlePreEdit(event) {
@@ -527,6 +510,8 @@ export async function handleStop(event, options = {}) {
         }
     }
     if (stale) {
+        // An earlier read-only turn of this session may have restored the handoff; work happened since.
+        await bestEffortMarkHandoff(progressPath, "interrupted", event.session_id);
         warnings.push("project-progress/Progress.md was not updated this session. If you did meaningful work, " +
             "update Resume Snapshot, Next Action, and Blockers before finishing.");
     }

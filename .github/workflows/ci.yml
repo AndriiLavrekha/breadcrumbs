@@ -17,6 +17,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - run: npm run build
       # dist/ is committed and plugin installs run it with no build step, so a stale dist reaches users.
-      - run: git diff --exit-code -- dist
+      # Rebuilding from empty also exposes outputs of deleted sources, and `git status` catches new untracked files.
+      - run: rm -rf dist && npm run build
+      - run: test -z "$(git status --porcelain -- dist)"
