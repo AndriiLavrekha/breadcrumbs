@@ -224,7 +224,7 @@ export function replaceFrontmatterValue(markdown: string, key: string, value: st
   const keyPattern = new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:.*$`, "m");
 
   if (keyPattern.test(frontmatter)) {
-    return `${frontmatter.replace(keyPattern, replacement)}${body}`;
+    return `${frontmatter.replace(keyPattern, () => replacement)}${body}`;
   }
 
   return `${lines[0]}${replacement}\n${markdown.slice(lines[0].length)}`;
