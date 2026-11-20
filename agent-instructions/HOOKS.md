@@ -11,6 +11,6 @@ Use hooks as a safety net around `project-progress/Progress.md` and `Resume Snap
 - final response: warn if meaningful work happened and progress appears stale.
 - commit, PR, or deploy: block or strongly warn when supported if meaningful work was not recorded, or if `sensitivity: sensitive` or `commit_progress: false` indicates progress files should not be staged.
 
-Use `hooks/project-progress-check.ps1` on Windows and `hooks/project-progress-check.sh` on POSIX systems. Configure them as reminder and validation hooks; keep semantic progress summaries in the Markdown files through agent updates.
+The lifecycle hooks ship in `hooks/hooks.json` (Claude Code) and `hooks/hooks-codex.json` (Codex); keep semantic progress summaries in the Markdown files through agent updates.
 
 Hooks cannot force an interactive prompt. For uninitialized projects, the hook should emit context and the agent should ask: `This project is not initialized with Breadcrumbs. Do you want me to create project-progress/ here?` If the user declines, record local opt-out state with `breadcrumbs state set . --state opted-out`.

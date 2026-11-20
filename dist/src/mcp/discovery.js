@@ -1,16 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { pathExists } from "../fs-util.js";
 import { parseProjectSummary } from "./markdown.js";
 export const DEFAULT_DISCOVERY_EXCLUDES = [".git", "node_modules", "vendor", ".cache", ".venv", "dist"];
-async function pathExists(filePath) {
-    try {
-        await fs.access(filePath);
-        return true;
-    }
-    catch {
-        return false;
-    }
-}
 async function mapWithConcurrency(items, limit, run) {
     let next = 0;
     const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {

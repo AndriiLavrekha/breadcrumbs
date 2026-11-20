@@ -3,7 +3,8 @@ import path from "node:path";
 import { hasMojibake, repairEncoding } from "./encoding.js";
 import { scanLines, sectionMatches, splitFrontmatter } from "./mcp/markdown.js";
 import type { ScannedLine } from "./mcp/markdown.js";
-import { ALLOWED_PROGRESS_SECTIONS, appendToArchive, foldDoneSection } from "./mcp/writer.js";
+import { ALLOWED_PROGRESS_SECTIONS } from "./hook/schema.js";
+import { appendToArchive, foldDoneSection } from "./mcp/writer.js";
 
 // The template ships `## Verification`, which the MCP write tool does not
 // accept but which is still a legitimate section.

@@ -263,3 +263,13 @@ describe("updateArchiveFile", () => {
     await expect(updateArchiveFile(dir, (current) => current)).rejects.toThrow();
   });
 });
+
+describe("replaceFrontmatterValue literal values", () => {
+  it.each(["keep $' here", "cost $$5", "a $& b"])("treats %s literally", (value) => {
+    const doc = ["---", "project: X", "status: active", "last_milestone: old", "---", "", "## Next Action", "", "go", ""].join("\n");
+
+    const updated = replaceFrontmatterValue(doc, "last_milestone", value);
+
+    expect(updated).toBe(doc.replace("last_milestone: old", () => `last_milestone: ${value}`));
+  });
+});

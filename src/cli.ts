@@ -5,11 +5,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { parseProjectSummary } from "./mcp/markdown.js";
-import { upsertIndexedProject } from "./mcp/index.js";
+import { pathExists } from "./fs-util.js";
+import { indexDir, upsertIndexedProject } from "./mcp/index.js";
 import { main as runMcpServer } from "./mcp/server.js";
 import { sha256 } from "./hash.js";
 import { planCompaction, readProgressFiles, applyArchive } from "./compact.js";
-import { ProgressConflictError, updateArchiveFile, writeFileAtomic } from "./mcp/writer.js";
+import { ProgressConflictError, todayIso, updateArchiveFile, writeFileAtomic } from "./mcp/writer.js";
 import { PACKAGE_ROOT, PACKAGE_VERSION } from "./package.js";
 import {
   listProjectTrackingStates,
@@ -211,22 +212,9 @@ Environment:
 `;
 }
 
-function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
 function inferProjectName(targetRoot: string): string {
   const name = path.basename(path.resolve(targetRoot));
   return name || "Project";
-}
-
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function replaceTemplateValues(markdown: string, options: Required<Pick<InitOptions, "projectName" | "today">> & { targetRoot: string }): string {
@@ -243,10 +231,6 @@ export async function initProject(options: InitOptions = {}): Promise<InitResult
   const today = options.today ?? todayIso();
   const targetProgressDir = path.join(targetRoot, "project-progress");
 
-  if ((await pathExists(targetProgressDir)) && !options.force) {
-    throw new Error(`project-progress already exists at ${targetProgressDir}. Use --force to overwrite template files.`);
-  }
-
   await fs.mkdir(targetProgressDir, { recursive: true });
   const entries = await fs.readdir(TEMPLATE_DIR, { withFileTypes: true });
   const createdFiles: string[] = [];
@@ -256,9 +240,8 @@ export async function initProject(options: InitOptions = {}): Promise<InitResult
 
     const sourcePath = path.join(TEMPLATE_DIR, entry.name);
     const targetPath = path.join(targetProgressDir, entry.name);
-    if ((await pathExists(targetPath)) && !options.force) {
-      throw new Error(`${targetPath} already exists. Use --force to overwrite template files.`);
-    }
+    // Without --force, never touch what is already there: filling in a missing Progress.md must not wipe the log.
+    if ((await pathExists(targetPath)) && !options.force) continue;
 
     const source = await fs.readFile(sourcePath, "utf-8");
     await fs.writeFile(
@@ -267,6 +250,10 @@ export async function initProject(options: InitOptions = {}): Promise<InitResult
       "utf-8"
     );
     createdFiles.push(targetPath);
+  }
+
+  if (createdFiles.length === 0 && !options.force) {
+    throw new Error(`project-progress already exists at ${targetProgressDir}. Use --force to overwrite template files.`);
   }
 
   return { targetProgressDir, createdFiles };
@@ -784,11 +771,12 @@ async function checkNpx(): Promise<DoctorCheck> {
   }
 }
 
-async function checkIndexWritable(homeDir: string): Promise<DoctorCheck> {
-  const dir = path.join(homeDir, ".awesome-progress-tracker");
+// homeDir is only an explicit override; left undefined this follows AWESOME_PROGRESS_TRACKER_HOME like the index does.
+async function checkIndexWritable(homeDir?: string): Promise<DoctorCheck> {
+  const dir = indexDir(homeDir);
   try {
     await fs.mkdir(dir, { recursive: true });
-    await fs.access(dir);
+    await fs.access(dir, fs.constants.W_OK);
     return { name: "index", ok: true, message: `${dir} is available` };
   } catch {
     return { name: "index", ok: false, message: `${dir} is not writable` };
@@ -873,7 +861,7 @@ export async function runDoctor(options: StatusOptions = {}): Promise<DoctorResu
       { name: "skill", ok: skillInstalled, message: skillMessage },
       { name: "mcp", ok: mcpConfigured, message: mcpMessage },
       { name: "mcp-connection", ok: mcpConnectionOk, message: mcpConnectionMessage },
-      await checkIndexWritable(homeDir),
+      await checkIndexWritable(options.homeDir),
       {
         name: "project",
         ok: true,
@@ -903,7 +891,7 @@ export async function runDoctor(options: StatusOptions = {}): Promise<DoctorResu
       ok: status.mcpConfigured,
       message: status.mcpConfigured ? "MCP config is installed" : "MCP config is missing"
     },
-    await checkIndexWritable(homeDir),
+    await checkIndexWritable(options.homeDir),
     {
       name: "project",
       ok: true,

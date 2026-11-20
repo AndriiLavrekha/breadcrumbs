@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathExists } from "../fs-util.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { bodyHash, sha256 } from "../hash.js";
 import { extractSection, isKnownRuntimeValue, parseFrontmatter, renderLastRuntime } from "../mcp/markdown.js";
@@ -10,6 +11,8 @@ import { readProjectTrackingState, setProjectTrackingState } from "../project-st
 import { defaultGitRunner as git, readCheckpoint, resolveDrift } from "./checkpoint.js";
 import { renderDrift, renderGates } from "./checkpoint-render.js";
 import { checkFreshness } from "./freshness.js";
+import { analyzeGitCommand } from "./git-command.js";
+import { CLEAN_TREE, committedSince, headReflogSize, treeFingerprint } from "./work-evidence.js";
 import { checkProgressHealth, summarizeProblems, validateProgressFile } from "./validator.js";
 import type { HealthFinding } from "./validator.js";
 
@@ -36,7 +39,7 @@ export interface HookResult {
 
 async function initializationGuidance(cwd: string, hookEventName: string): Promise<HookResult> {
   const progressPath = progressPathFor(cwd);
-  if (await fileExists(progressPath)) return { code: 0 };
+  if (await pathExists(progressPath)) return { code: 0 };
 
   const state = await bestEffortReadProjectState(cwd);
   if (state === "opted-out") return { code: 0 };
@@ -64,15 +67,6 @@ function progressPathFor(cwd: string): string {
   return path.join(cwd, "project-progress", "Progress.md");
 }
 
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function sessionStateDir(): string {
   return path.join(os.tmpdir(), "awesome-progress-tracker", "sessions");
 }
@@ -89,6 +83,13 @@ interface SessionState {
   stopBlocked?: boolean;
   healthShown?: boolean;
   bodyHash?: string;
+  headAtStart?: string;
+  // HEAD reflog length and uncommitted-tree fingerprint at start, so Stop counts only what this session did.
+  reflogBytesAtStart?: number;
+  treeAtStart?: string;
+  // Frontmatter handoff and session_id before SessionStart marked them, so a session that did nothing can put them back.
+  handoffAtStart?: string;
+  sessionIdAtStart?: string;
 }
 
 async function readSessionState(sessionId: string | undefined): Promise<SessionState> {
@@ -106,13 +107,73 @@ async function writeSessionState(sessionId: string, state: SessionState): Promis
   await fs.writeFile(sessionStatePath(sessionId), JSON.stringify(state), "utf-8");
 }
 
-async function recordSessionStart(sessionId: string | undefined, cwd: string): Promise<void> {
-  if (!sessionId) return;
+const SESSION_STATE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+// Nothing else deletes these files and Windows does not clean %TEMP% by itself.
+async function pruneSessionState(now: number = Date.now()): Promise<void> {
   try {
-    await writeSessionState(sessionId, { startedAt: new Date().toISOString(), cwd });
+    const dir = sessionStateDir();
+    for (const name of await fs.readdir(dir)) {
+      if (!name.endsWith(".json")) continue;
+      const file = path.join(dir, name);
+      const { mtimeMs } = await fs.stat(file);
+      if (now - mtimeMs > SESSION_STATE_MAX_AGE_MS) await fs.rm(file, { force: true });
+    }
   } catch {
     // best effort only
   }
+}
+
+function currentHead(cwd: string): string | undefined {
+  return git(cwd, ["rev-parse", "HEAD"])?.trim() || undefined;
+}
+
+interface HandoffFields {
+  handoff: string;
+  sessionId?: string;
+}
+
+// A Progress.md without a handoff key (a fresh init) counts as clean.
+async function readHandoffFields(progressPath: string): Promise<HandoffFields> {
+  try {
+    const frontmatter = parseFrontmatter(await fs.readFile(progressPath, "utf-8"));
+    const sessionId = frontmatter.session_id ? String(frontmatter.session_id) : undefined;
+    return { handoff: typeof frontmatter.handoff === "string" ? frontmatter.handoff : "clean", sessionId };
+  } catch {
+    return { handoff: "clean" };
+  }
+}
+
+// Returns false when this start only repeats one already recorded: Claude Code re-runs SessionStart after
+// compaction (source "compact"), and that must not reset the baseline Stop compares Progress.md against.
+// Docs do not say whether session_id survives compaction; a new id simply gets a fresh baseline.
+async function recordSessionStart(
+  sessionId: string | undefined,
+  cwd: string,
+  source: string | undefined,
+  atStart: HandoffFields,
+  tracked: boolean
+): Promise<boolean> {
+  if (!sessionId) return true;
+  try {
+    if (source === "compact") {
+      const existing = await readSessionState(sessionId);
+      if (existing.startedAt && existing.cwd === cwd) return false;
+    }
+    await writeSessionState(sessionId, {
+      startedAt: new Date().toISOString(),
+      cwd,
+      headAtStart: currentHead(cwd),
+      // Stop does nothing without Progress.md, so skip the git scans there; a project initialized mid-session
+      // falls back to comparing HEAD and a clean tree.
+      ...(tracked ? { reflogBytesAtStart: await headReflogSize(cwd), treeAtStart: await treeFingerprint(cwd) } : {}),
+      handoffAtStart: atStart.handoff,
+      sessionIdAtStart: atStart.sessionId
+    });
+  } catch {
+    // best effort only
+  }
+  return true;
 }
 
 async function bestEffortRecordBodyHash(sessionId: string | undefined, markdown: string): Promise<void> {
@@ -127,6 +188,8 @@ async function bestEffortRecordBodyHash(sessionId: string | undefined, markdown:
 
 async function bestEffortSetProjectState(cwd: string, state: "initialized"): Promise<void> {
   try {
+    // Every SessionStart would otherwise rewrite the shared state file for no change.
+    if ((await readProjectTrackingState(cwd)).state === state) return;
     await setProjectTrackingState(cwd, state);
   } catch {
     // best effort only
@@ -206,57 +269,14 @@ async function bestEffortRecordSessionEnd(
   }
 }
 
-// A porcelain line is "XY path", or "XY orig -> path" for a rename. The two
-// status columns are fixed-width, so the path starts at index 2.
-//
-// Returns a normalized classification KEY for a porcelain line, not a usable
-// filesystem path. Git quotes and octal-escapes paths containing non-ASCII or
-// special bytes; this deliberately does not unescape them, because the only
-// consumer is an ASCII prefix test that is unaffected by escaped tails. Do not
-// use this value to open a file.
-function porcelainPathKey(line: string): string {
-  const rest = line.slice(2).trim();
-  const arrow = rest.indexOf(" -> ");
-  const target = arrow === -1 ? rest : rest.slice(arrow + 4);
-  const unquoted = target.replace(/^"|"$/g, "");
-  // Only normalize separators on unquoted paths. A quoted path may contain
-  // backslash escape sequences that are not separators.
-  return unquoted === target ? unquoted.replace(/\\/g, "/") : unquoted;
-}
-
-function isProgressPath(line: string): boolean {
-  const target = porcelainPathKey(line);
-  return target.startsWith("project-progress/") || target.includes("/project-progress/");
-}
-
-// SessionStart and checkpoint stamping now write Progress.md, so a dirty
-// progress folder is no longer evidence that the agent did any work. Only
-// changes elsewhere count.
-function gitHasChanges(cwd: string): boolean {
-  // --untracked-files=all keeps git from collapsing a wholly-untracked
-  // directory to a single "?? dir/" line, which would hide a nested
-  // project-progress/ folder inside another untracked directory.
-  const out = git(cwd, ["status", "--porcelain", "--untracked-files=all"]);
-  if (out === null) return false;
-
-  return out
-    .split(/\r?\n/)
-    .filter((line) => line.trim().length > 0)
-    .some((line) => !isProgressPath(line));
-}
-
-function stagedFiles(cwd: string): string[] {
+// null means git could not be inspected; callers that guard something must not read that as "nothing staged".
+function stagedFiles(cwd: string): string[] | null {
   const out = git(cwd, ["diff", "--cached", "--name-only"]);
-  if (!out) return [];
+  if (out === null) return null;
   return out
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
-}
-
-function isCommitCommand(command: string): boolean {
-  // Match `git commit ...` (allow flags/env prefixes), not `git commit-graph` etc.
-  return /\bgit\b[\s\S]*\bcommit\b(?![\w-])/.test(command);
 }
 
 function emitJson(value: unknown): string {
@@ -290,17 +310,19 @@ async function bestEffortHealth(progressPath: string): Promise<HealthFinding[]> 
 
 export async function handleSessionStart(event: HookEvent): Promise<HookResult> {
   const cwd = event.cwd ?? process.cwd();
-  await recordSessionStart(event.session_id, cwd);
-
   const progressPath = progressPathFor(cwd);
-  if (!(await fileExists(progressPath))) {
+  await pruneSessionState();
+  const tracked = await pathExists(progressPath);
+  const fresh = await recordSessionStart(event.session_id, cwd, event.source, await readHandoffFields(progressPath), tracked);
+
+  if (!tracked) {
     return await initializationGuidance(cwd, "SessionStart");
   }
 
   await bestEffortSetProjectState(cwd, "initialized");
 
   const markdown = await fs.readFile(progressPath, "utf-8");
-  await bestEffortRecordBodyHash(event.session_id, markdown);
+  if (fresh) await bestEffortRecordBodyHash(event.session_id, markdown);
   const frontmatter = parseFrontmatter(markdown);
 
   const lines: string[] = [
@@ -335,7 +357,9 @@ export async function handleSessionStart(event: HookEvent): Promise<HookResult> 
     }
   }
 
-  if (frontmatter.handoff === "interrupted") {
+  // After compaction the interrupted mark is this very session's own, not a predecessor's.
+  const ownMark = !fresh && frontmatter.session_id === event.session_id;
+  if (frontmatter.handoff === "interrupted" && !ownMark) {
     const previous = frontmatter.session_id ? String(frontmatter.session_id) : "(unknown)";
     lines.push(
       `\nPrevious session ${previous} ended without a clean handoff. ` +
@@ -355,7 +379,7 @@ export async function handleSessionStart(event: HookEvent): Promise<HookResult> 
   const gates = renderGates(frontmatter);
   if (gates) lines.push(`\n${gates}`);
 
-  await bestEffortMarkHandoff(progressPath, "interrupted", event.session_id);
+  if (fresh) await bestEffortMarkHandoff(progressPath, "interrupted", event.session_id);
 
   return {
     code: 0,
@@ -372,44 +396,88 @@ export async function handleUserPromptSubmit(event: HookEvent): Promise<HookResu
   return await initializationGuidance(event.cwd ?? process.cwd(), "UserPromptSubmit");
 }
 
-export async function handlePreCommit(event: HookEvent): Promise<HookResult> {
-  const cwd = event.cwd ?? process.cwd();
-  const command = event.tool_input?.command ?? "";
-  if (!isCommitCommand(command)) return { code: 0 };
-
-  const progressPath = progressPathFor(cwd);
-  if (!(await fileExists(progressPath))) return { code: 0 };
-
-  const markdown = await fs.readFile(progressPath, "utf-8");
-  const frontmatter = parseFrontmatter(markdown);
-  const restricted = frontmatter.commit_progress === false || frontmatter.sensitivity === "sensitive";
-  if (!restricted) return { code: 0 };
-
-  const progressStaged = stagedFiles(cwd).some((file) =>
-    file.replace(/\\/g, "/").includes("project-progress/")
-  );
-  if (!progressStaged) return { code: 0 };
-
-  const why = frontmatter.commit_progress === false ? "commit_progress: false" : "sensitivity: sensitive";
+function denyCommit(reason: string): HookResult {
   return {
     code: 0,
     stdout: emitJson({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason:
-          `project-progress files are staged but Progress.md declares ${why}. ` +
-          "Unstage them with `git restore --staged project-progress/` before committing, " +
-          "or change the policy in Progress.md if sharing is intended."
+        permissionDecisionReason: reason
       }
     })
   };
 }
 
+// Loose gate, kept from before the strict classifier: it only ever gates the staged-files check, which denies
+// real staged progress files and nothing else, so it cannot conflict with ADR 0009's "confidently classified" rule.
+const LOOSE_COMMIT = /\bgit\b[\s\S]*\bcommit\b(?![\w-])/;
+
+export async function handlePreCommit(event: HookEvent): Promise<HookResult> {
+  const cwd = event.cwd ?? process.cwd();
+  const command = event.tool_input?.command ?? "";
+  const { commits, adds } = analyzeGitCommand(command);
+  const strict = commits.length > 0;
+  if (!strict && !LOOSE_COMMIT.test(command)) return { code: 0 };
+
+  const progressPath = progressPathFor(cwd);
+  if (!(await pathExists(progressPath))) return { code: 0 };
+
+  // ADR 0009: for a confidently classified commit, anything we cannot verify blocks the commit.
+  // runHook turns every throw into "allow", so failures must be caught here.
+  try {
+    const frontmatter = parseFrontmatter(await fs.readFile(progressPath, "utf-8"));
+    const restricted = frontmatter.commit_progress === false || frontmatter.sensitivity === "sensitive";
+    if (!restricted) return { code: 0 };
+
+    const why = frontmatter.commit_progress === false ? "commit_progress: false" : "sensitivity: sensitive";
+    const cannotInspect =
+      `Breadcrumbs could not inspect git, and Progress.md declares ${why}. ` +
+      "Fix the repository state or change the policy in Progress.md, then retry the commit.";
+
+    const staged = stagedFiles(cwd);
+    if (staged === null) return strict ? denyCommit(cannotInspect) : { code: 0 };
+    if (staged.some((file) => file.replace(/\\/g, "/").includes("project-progress/"))) {
+      return denyCommit(
+        `project-progress files are staged but Progress.md declares ${why}. ` +
+          "Unstage them with `git restore --staged project-progress/` before committing, " +
+          "or change the policy in Progress.md if sharing is intended."
+      );
+    }
+    if (!strict) return { code: 0 };
+
+    // Nothing is staged yet, but this same command may stage the progress files itself.
+    const stagesEverything =
+      adds.some((add) => add.broad || add.namesProgress) || commits.some((commit) => commit.namesProgress);
+    const stagesTracked = commits.some((commit) => commit.stagesTracked || commit.broadPathspec);
+    if (stagesEverything || stagesTracked) {
+      const porcelain = git(cwd, ["status", "--porcelain", "--", "project-progress"]);
+      if (porcelain === null) return denyCommit(cannotInspect);
+      const changes = porcelain.split(/\r?\n/).filter((line) => line.trim().length > 0);
+      // `commit -a` never adds untracked files; `git add -A` and explicit paths do.
+      const wouldStage = stagesEverything ? changes : changes.filter((line) => !line.startsWith("??"));
+      if (wouldStage.length > 0) {
+        return denyCommit(
+          `This command would commit project-progress files, but Progress.md declares ${why}. ` +
+            "Commit specific paths instead of -a / git add -A, or change the policy in Progress.md if sharing is intended."
+        );
+      }
+    }
+    return { code: 0 };
+  } catch {
+    return strict
+      ? denyCommit(
+          "Breadcrumbs could not verify whether project-progress files would be committed. " +
+            "Check that Progress.md is readable, then retry."
+        )
+      : { code: 0 };
+  }
+}
+
 export async function handlePreEdit(event: HookEvent): Promise<HookResult> {
   const cwd = event.cwd ?? process.cwd();
   const progressPath = progressPathFor(cwd);
-  if (!(await fileExists(progressPath))) return { code: 0 };
+  if (!(await pathExists(progressPath))) return { code: 0 };
 
   const filePath = (event.tool_input?.file_path as string | undefined) ?? "";
   const normalized = filePath.replace(/\\/g, "/");
@@ -434,6 +502,32 @@ export async function handlePreEdit(event: HookEvent): Promise<HookResult> {
   };
 }
 
+async function progressBodyChanged(progressPath: string, startHash: string | undefined): Promise<boolean> {
+  if (!startHash) return false;
+  try {
+    return bodyHash(await fs.readFile(progressPath, "utf-8")) !== startHash;
+  } catch {
+    return false;
+  }
+}
+
+// SessionStart marks the handoff interrupted. A session that did nothing puts back what was there, but only
+// while that mark is still this session's own: another session may have ended clean since.
+async function bestEffortRestoreHandoff(progressPath: string, state: SessionState, sessionId?: string): Promise<void> {
+  if (!sessionId || !state.handoffAtStart) return;
+  try {
+    const markdown = await fs.readFile(progressPath, "utf-8");
+    const frontmatter = parseFrontmatter(markdown);
+    if (frontmatter.handoff !== "interrupted" || String(frontmatter.session_id) !== sessionId) return;
+    if (state.handoffAtStart === "interrupted") return;
+    let restored = replaceFrontmatterValue(markdown, "handoff", state.handoffAtStart);
+    if (state.sessionIdAtStart) restored = replaceFrontmatterValue(restored, "session_id", state.sessionIdAtStart);
+    await writeFileAtomic(progressPath, restored, sha256(markdown));
+  } catch {
+    // best effort only
+  }
+}
+
 export interface HandleStopOptions {
   // Claude Code's Stop hook can block (exit 2) to force the agent to keep
   // working instead of ending its turn. Codex's exit-2 semantics for its
@@ -447,15 +541,30 @@ export async function handleStop(event: HookEvent, options: HandleStopOptions = 
   const { allowBlock = true } = options;
   const cwd = event.cwd ?? process.cwd();
   const progressPath = progressPathFor(cwd);
-  if (!(await fileExists(progressPath))) return { code: 0 };
-  // Only nudge when the working tree shows activity, so projects that just read
-  // progress (or aren't git repos) are never nagged.
-  if (!gitHasChanges(cwd)) return { code: 0 };
+  if (!(await pathExists(progressPath))) return { code: 0 };
+
+  const sessionState = await readSessionState(event.session_id);
+  // Only nudge when the session did work, so read-only sessions are never nagged. Work is a commit written
+  // since start or an uncommitted tree outside project-progress/ that differs from the one at start. Without
+  // git there is no other evidence, so an edited Progress.md body counts there; in a git repo a progress-only
+  // edit is deliberately not meaningful work (ADR 0006).
+  const head = currentHead(cwd);
+  const committed =
+    sessionState.reflogBytesAtStart === undefined
+      ? undefined
+      : await committedSince(cwd, sessionState.reflogBytesAtStart);
+  const madeCommits = committed ?? Boolean(sessionState.headAtStart && head && head !== sessionState.headAtStart);
+  const tree = await treeFingerprint(cwd);
+  const treeChanged = tree !== undefined && tree !== (sessionState.treeAtStart ?? CLEAN_TREE);
+  const bodyChanged = !head && (await progressBodyChanged(progressPath, sessionState.bodyHash));
+  if (!madeCommits && !treeChanged && !bodyChanged) {
+    await bestEffortRestoreHandoff(progressPath, sessionState, event.session_id);
+    return { code: 0 };
+  }
 
   const warnings: string[] = [];
 
   let stale = true;
-  const sessionState = await readSessionState(event.session_id);
   const startedAt = sessionState.startedAt ? Date.parse(sessionState.startedAt) : NaN;
   if (Number.isFinite(startedAt)) {
     try {
@@ -471,6 +580,8 @@ export async function handleStop(event: HookEvent, options: HandleStopOptions = 
     }
   }
   if (stale) {
+    // An earlier read-only turn of this session may have restored the handoff; work happened since.
+    await bestEffortMarkHandoff(progressPath, "interrupted", event.session_id);
     warnings.push(
       "project-progress/Progress.md was not updated this session. If you did meaningful work, " +
         "update Resume Snapshot, Next Action, and Blockers before finishing."

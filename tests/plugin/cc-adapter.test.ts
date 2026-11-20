@@ -6,6 +6,7 @@ import path from "node:path";
 import { handlePreCommit, handlePreEdit, handleSessionStart, handleStop, handleUserPromptSubmit, providerFromArgv, runHook } from "../../src/hook/cc-adapter.js";
 import { validateProgressFile } from "../../src/hook/validator.js";
 import { parseFrontmatter } from "../../src/mcp/markdown.js";
+import { replaceFrontmatterValue } from "../../src/mcp/writer.js";
 import { readProjectTrackingState, setProjectTrackingState } from "../../src/project-state.js";
 
 async function withTrackerHome(run: (home: string) => Promise<void>): Promise<void> {
@@ -278,6 +279,154 @@ describe("cc-adapter pre-commit guard", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toBeUndefined();
   });
+
+  async function restrictedRepoWithDirtyProgress(): Promise<string> {
+    const dir = await makeRepo();
+    const file = await writeProgress(dir, progressDoc({ sensitivity: "sensitive" }));
+    await commitAll(dir, "init");
+    await fs.appendFile(file, "\nedited after commit\n", "utf-8");
+    return dir;
+  }
+
+  function decision(result: { stdout?: string }): string | undefined {
+    return result.stdout ? JSON.parse(result.stdout).hookSpecificOutput.permissionDecision : undefined;
+  }
+
+  it("denies git commit -am when restricted progress has tracked changes", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: 'git commit -am "x"' } });
+    expect(decision(result)).toBe("deny");
+    expect(JSON.parse(result.stdout!).hookSpecificOutput.permissionDecisionReason).toContain("instead of -a");
+  });
+
+  it("denies git add -A && git commit when restricted progress is dirty", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: "git add -A && git commit -m x" } });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("denies git add . && git commit when restricted progress is untracked", async () => {
+    const dir = await makeRepo();
+    await writeProgress(dir, progressDoc({ commit_progress: "false" }));
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: "git add . && git commit -m x" } });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("denies git commit with an explicit project-progress path", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({
+      cwd: dir,
+      tool_input: { command: "git commit project-progress/Progress.md -m x" }
+    });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("allows git add of a specific file then commit while restricted progress is dirty", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({
+      cwd: dir,
+      tool_input: { command: "git add src/x.ts && git commit -m y" }
+    });
+    expect(result.stdout).toBeUndefined();
+  });
+
+  it("allows git commit -m with the letter a in the message", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: 'git commit -m "fix a bug"' } });
+    expect(result.stdout).toBeUndefined();
+  });
+
+  it("does not treat --amend as -a", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: "git commit --amend -m x" } });
+    expect(result.stdout).toBeUndefined();
+  });
+
+  it("examines every git add in the command, not only the first", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({
+      cwd: dir,
+      tool_input: { command: "git add src/x.ts && git add -A && git commit -m x" }
+    });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("keeps quoted text together so a semicolon in the message does not hide -a", async () => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: 'git commit -m "wip; more" -a' } });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it.each([
+    "if git commit -am x; then echo ok; fi",
+    "time git commit -am x",
+    "sudo git commit -am x",
+    'git -C "C:/My Dir" commit -a -m x',
+    "GIT_AUTHOR_NAME=me git commit --all -m x",
+    "git add src && git commit -m x .",
+    'git add "*.md" && git commit -m x'
+  ])("denies the wrapped or unusual form: %s", async (command) => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command } });
+    expect(decision(result), command).toBe("deny");
+  });
+
+  it.each([
+    "git commit -mrefactor",
+    "git commit -ma",
+    "git commit -m 'feat: add -a support'",
+    "git commit -m 'notes about project-progress handling'",
+    "git commit -m \"$(cat <<'EOF'\nsubject\n\ngit add .\nthen git add -A\nEOF\n)\""
+  ])("does not deny the ordinary commit: %s", async (command) => {
+    const dir = await restrictedRepoWithDirtyProgress();
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command } });
+    expect(result.stdout, command).toBeUndefined();
+  });
+
+  it("still denies a staged restricted progress file for forms the strict classifier does not recognise", async () => {
+    const dir = await makeRepo();
+    await writeProgress(dir, progressDoc({ sensitivity: "sensitive" }));
+    execFileSync("git", ["add", "project-progress/Progress.md"], { cwd: dir, stdio: "ignore" });
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: 'bash -c "git commit -m x"' } });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("does not deny an unrecognised form when git cannot be inspected", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-cc-nogit-"));
+    await writeProgress(dir, progressDoc({ sensitivity: "sensitive" }));
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: 'bash -c "git commit -m x"' } });
+    expect(result.stdout).toBeUndefined();
+  });
+
+  it("allows git commit -a when only untracked progress exists", async () => {
+    const dir = await makeRepo();
+    await writeProgress(dir, progressDoc({ commit_progress: "false" }));
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: "git commit -am x" } });
+    expect(result.stdout).toBeUndefined();
+  });
+
+  it("denies a commit when git cannot be inspected", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-cc-nogit-"));
+    await writeProgress(dir, progressDoc({ sensitivity: "sensitive" }));
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: "git commit -m x" } });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("denies a commit when Progress.md cannot be read", async () => {
+    const dir = await makeRepo();
+    await fs.mkdir(path.join(dir, "project-progress", "Progress.md"), { recursive: true });
+    const result = await handlePreCommit({ cwd: dir, tool_input: { command: "git commit -m x" } });
+    expect(decision(result)).toBe("deny");
+  });
+
+  it("does not deny commands that only mention commit when git cannot be inspected", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-cc-nogit-"));
+    await writeProgress(dir, progressDoc({ sensitivity: "sensitive" }));
+    for (const command of ["git log --grep commit", 'echo "git commit later"', "git commit-graph write"]) {
+      const result = await handlePreCommit({ cwd: dir, tool_input: { command } });
+      expect(result.stdout, command).toBeUndefined();
+    }
+  });
 });
 
 describe("cc-adapter pre-edit reminder", () => {
@@ -450,10 +599,10 @@ describe("cc-adapter checkpoint stamping", () => {
       const sha = await commitAll(dir, "init");
 
       // Dirty the tree so the meaningful-work predicate passes.
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-stamp-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       // Touch Progress.md after session start so freshness sees it as fresh.
       const current = await fs.readFile(file, "utf-8");
@@ -477,10 +626,10 @@ describe("cc-adapter checkpoint stamping", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, progressDoc({ project: "NoStamp" }));
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-nostamp-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       await handleStop({ cwd: dir, session_id: sessionId });
 
@@ -514,10 +663,10 @@ describe("cc-adapter checkpoint stamping", () => {
         })
       );
       const sha = await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-overwrite-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const current = await fs.readFile(file, "utf-8");
       await fs.writeFile(file, `${current}\n<!-- edited -->\n`, "utf-8");
@@ -540,10 +689,10 @@ describe("cc-adapter checkpoint stamping", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, progressDoc({ project: "StampFail" }));
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-stampfail-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const current = await fs.readFile(file, "utf-8");
       await fs.writeFile(file, `${current}\n<!-- edited -->\n`, "utf-8");
@@ -571,10 +720,10 @@ describe("cc-adapter checkpoint stamping", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, progressDoc({ project: "Exact" }));
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-exact-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const current = await fs.readFile(file, "utf-8");
       await fs.writeFile(file, `${current}\n<!-- edited -->\n`, "utf-8");
@@ -745,10 +894,10 @@ describe("cc-adapter body-hash freshness", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, progressDoc({ project: "BodyHash" }));
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-body-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       // A frontmatter-only edit must NOT satisfy the gate.
       const current = await fs.readFile(file, "utf-8");
@@ -766,10 +915,10 @@ describe("cc-adapter body-hash freshness", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, progressDoc({ project: "BodyHash2" }));
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-body2-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const current = await fs.readFile(file, "utf-8");
       await fs.writeFile(file, current.replace("Wire the widget.", "Ship the widget."), "utf-8");
@@ -785,10 +934,10 @@ describe("cc-adapter body-hash freshness", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, progressDoc({ status: "in_progress" }));
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-problems-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
       const current = await fs.readFile(file, "utf-8");
       await fs.writeFile(
         file,
@@ -813,10 +962,10 @@ describe("cc-adapter body-hash freshness", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, `${progressDoc({})}\n## Historical Notes\n\nold\n`);
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-compact-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
       const current = await fs.readFile(file, "utf-8");
       await fs.writeFile(file, current.replace("Wire the widget.", "Ship the widget."), "utf-8");
 
@@ -834,10 +983,10 @@ describe("cc-adapter body-hash freshness", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, `${progressDoc({ status: "in_progress", sensitivity: "bogus", deployed: "maybe" })}\n## Historical Notes\n\nold\n`);
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-crowd-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
       const current = await fs.readFile(file, "utf-8");
       await fs.writeFile(file, current.replace("Wire the widget.", "Ship the widget."), "utf-8");
 
@@ -851,10 +1000,10 @@ describe("cc-adapter body-hash freshness", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, progressDoc({ project: "BodyHashFallbackBlock" }));
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-fallback-block-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
       const startedAt = await dropSessionBodyHash(sessionId);
 
       // Body genuinely unchanged; force mtime to predate session start so the
@@ -875,10 +1024,10 @@ describe("cc-adapter body-hash freshness", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, progressDoc({ project: "BodyHashFallbackAllow" }));
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-fallback-allow-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
       const startedAt = await dropSessionBodyHash(sessionId);
 
       const current = await fs.readFile(file, "utf-8");
@@ -897,10 +1046,10 @@ describe("cc-adapter body-hash freshness", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, progressDoc({ project: "OnceCap" }));
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-once-cap-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const current = await fs.readFile(file, "utf-8");
       await fs.writeFile(file, current.replace("status: active", "status: paused"), "utf-8");
@@ -944,10 +1093,10 @@ describe("cc-adapter meaningful-work predicate", () => {
       const dir = await makeRepo();
       await writeProgress(dir, progressDoc({ project: "RealWork" }));
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = `s-realwork-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const result = await handleStop({ cwd: dir, session_id: sessionId });
 
@@ -961,12 +1110,12 @@ describe("cc-adapter meaningful-work predicate", () => {
       const file = await writeProgress(dir, progressDoc({ project: "Both" }));
       await commitAll(dir, "init");
 
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
       const current = await fs.readFile(file, "utf-8");
       await fs.writeFile(file, `${current}\n<!-- touched -->\n`, "utf-8");
 
       const sessionId = `s-both-${Date.now()}`;
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const result = await handleStop({ cwd: dir, session_id: sessionId });
 
@@ -1113,10 +1262,10 @@ describe("cc-adapter session handoff", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, progressDoc({ project: "Handoff5" }));
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = "sess-five";
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const current = await fs.readFile(file, "utf-8");
       await fs.writeFile(file, current.replace("Wire the widget.", "Ship the widget."), "utf-8");
@@ -1132,10 +1281,10 @@ describe("cc-adapter session handoff", () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, progressDoc({ project: "Handoff6" }));
       await commitAll(dir, "init");
-      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       const sessionId = "sess-six";
       await handleSessionStart({ cwd: dir, session_id: sessionId });
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
 
       await handleStop({ cwd: dir, session_id: sessionId });
 
@@ -1143,14 +1292,343 @@ describe("cc-adapter session handoff", () => {
     });
   });
 
-  it("still records a clean handoff outside a git repository", async () => {
+  it("records a clean handoff outside a git repository after Progress.md is updated", async () => {
     await withTrackerHome(async () => {
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-handoff-nogit-"));
       const file = await writeProgress(dir, progressDoc({ project: "Handoff7" }));
+      const sessionId = `sess-seven-${Date.now()}`;
 
-      await handleSessionStart({ cwd: dir, session_id: "sess-seven" });
-
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
       expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("interrupted");
+
+      const current = await fs.readFile(file, "utf-8");
+      await fs.writeFile(file, current.replace("Wire the widget.", "Wire the gadget."), "utf-8");
+      await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+    });
+  });
+
+  it("treats a moved HEAD as work even when the tree is clean", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      await writeProgress(dir, progressDoc({ project: "Handoff8" }));
+      await commitAll(dir, "init");
+      const sessionId = `sess-eight-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
+      await commitAll(dir, "work");
+
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+      expect(stop.code).toBe(2);
+      expect(stop.stderr).toContain("was not updated");
+    });
+  });
+
+  it("restores the handoff recorded at start when the session did no work", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      const file = await writeProgress(dir, progressDoc({ project: "Handoff9", handoff: "clean" }));
+      await commitAll(dir, "init");
+      const sessionId = `sess-nine-${Date.now()}`;
+
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("interrupted");
+
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+      expect(stop.code).toBe(0);
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+    });
+  });
+
+  it("restores clean for a project whose Progress.md has no handoff key", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      const file = await writeProgress(dir, progressDoc({ project: "Handoff11" }));
+      await commitAll(dir, "init");
+      const sessionId = `sess-eleven-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+    });
+  });
+
+  it("marks the handoff interrupted again when unrecorded work follows a read-only turn", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      const file = await writeProgress(dir, progressDoc({ project: "Handoff12", handoff: "clean" }));
+      await commitAll(dir, "init");
+      const sessionId = `sess-twelve-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      await handleStop({ cwd: dir, session_id: sessionId });
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
+      const second = await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(second.code).toBe(2);
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("interrupted");
+    });
+  });
+
+  it("does not overwrite a clean handoff another session recorded in the meantime", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      const file = await writeProgress(dir, progressDoc({ project: "Handoff10", handoff: "interrupted" }));
+      await commitAll(dir, "init");
+      const sessionId = `sess-ten-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      const markdown = await fs.readFile(file, "utf-8");
+      await fs.writeFile(file, replaceFrontmatterValue(markdown, "handoff", "clean"), "utf-8");
+
+      await handleStop({ cwd: dir, session_id: sessionId });
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+    });
+  });
+
+  it("does not count switching branches, a fast-forward merge or a reset as work", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      const file = await writeProgress(dir, progressDoc({ project: "ReadOnlyMoves", handoff: "clean" }));
+      await commitAll(dir, "init");
+      execFileSync("git", ["switch", "-q", "-c", "other"], { cwd: dir, stdio: "ignore" });
+      await fs.writeFile(path.join(dir, "upstream.txt"), "theirs", "utf-8");
+      await commitAll(dir, "upstream work");
+      execFileSync("git", ["switch", "-q", "main"], { cwd: dir, stdio: "ignore" });
+      const sessionId = `sess-moves-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      execFileSync("git", ["switch", "-q", "other"], { cwd: dir, stdio: "ignore" });
+      execFileSync("git", ["switch", "-q", "main"], { cwd: dir, stdio: "ignore" });
+      execFileSync("git", ["merge", "-q", "--ff-only", "other"], { cwd: dir, stdio: "ignore" });
+      execFileSync("git", ["reset", "-q", "--hard", "HEAD~1"], { cwd: dir, stdio: "ignore" });
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(stop.code).toBe(0);
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+    });
+  });
+
+  it("counts an amended commit as work", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      await writeProgress(dir, progressDoc({ project: "Amend" }));
+      await commitAll(dir, "init");
+      const sessionId = `sess-amend-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
+      execFileSync("git", ["add", "src.txt"], { cwd: dir, stdio: "ignore" });
+      execFileSync("git", ["commit", "-q", "--amend", "--no-edit"], { cwd: dir, stdio: "ignore" });
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(stop.code).toBe(2);
+    });
+  });
+
+  it("takes the git work snapshots only in a project with Progress.md", async () => {
+    await withTrackerHome(async () => {
+      const bare = await makeRepo();
+      const tracked = await makeRepo();
+      await writeProgress(tracked, progressDoc({ project: "Snapshots" }));
+      const bareId = `sess-snap-bare-${Date.now()}`;
+      const trackedId = `sess-snap-tracked-${Date.now()}`;
+
+      await handleSessionStart({ cwd: bare, session_id: bareId });
+      await handleSessionStart({ cwd: tracked, session_id: trackedId });
+
+      const bareState = JSON.parse(await fs.readFile(sessionStatePathFor(bareId), "utf-8"));
+      const trackedState = JSON.parse(await fs.readFile(sessionStatePathFor(trackedId), "utf-8"));
+      expect(bareState.treeAtStart).toBeUndefined();
+      expect(bareState.reflogBytesAtStart).toBeUndefined();
+      expect(trackedState.treeAtStart).toEqual(expect.any(String));
+      expect(trackedState.reflogBytesAtStart).toEqual(expect.any(Number));
+    });
+  });
+
+  it("counts finishing a conflicted cherry-pick with git commit as work", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      await writeProgress(dir, progressDoc({ project: "CherryPick" }));
+      await fs.writeFile(path.join(dir, "f.txt"), "base", "utf-8");
+      await commitAll(dir, "init");
+      execFileSync("git", ["switch", "-q", "-c", "side"], { cwd: dir, stdio: "ignore" });
+      await fs.writeFile(path.join(dir, "f.txt"), "side", "utf-8");
+      await commitAll(dir, "side");
+      execFileSync("git", ["switch", "-q", "main"], { cwd: dir, stdio: "ignore" });
+      await fs.writeFile(path.join(dir, "f.txt"), "mine", "utf-8");
+      await commitAll(dir, "mine");
+      const sessionId = `sess-cherry-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      try {
+        execFileSync("git", ["cherry-pick", "side"], { cwd: dir, stdio: "ignore" });
+      } catch {
+        // conflict expected
+      }
+      await fs.writeFile(path.join(dir, "f.txt"), "resolved", "utf-8");
+      execFileSync("git", ["add", "f.txt"], { cwd: dir, stdio: "ignore" });
+      execFileSync("git", ["commit", "-q", "--no-edit"], { cwd: dir, stdio: "ignore" });
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(stop.code).toBe(2);
+    });
+  });
+
+  it("counts the first commit of a repository with no commits as work", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      await writeProgress(dir, progressDoc({ project: "Unborn" }));
+      const sessionId = `sess-unborn-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
+      await commitAll(dir, "first");
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(stop.code).toBe(2);
+      expect(stop.stderr).toContain("was not updated");
+    });
+  });
+
+  it("does not count edits that were already in the tree at start as work", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      const file = await writeProgress(dir, progressDoc({ project: "DirtyStart", handoff: "clean" }));
+      await commitAll(dir, "init");
+      await fs.writeFile(path.join(dir, "leftover.txt"), "from an earlier session", "utf-8");
+      const sessionId = `sess-dirty-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(stop.code).toBe(0);
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+    });
+  });
+
+  it("counts a further edit to a file that was already dirty at start as work", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      await writeProgress(dir, progressDoc({ project: "DirtyEdit" }));
+      await fs.writeFile(path.join(dir, "app.txt"), "v1", "utf-8");
+      await commitAll(dir, "init");
+      await fs.writeFile(path.join(dir, "app.txt"), "v2", "utf-8");
+      const sessionId = `sess-dirty-edit-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      await fs.writeFile(path.join(dir, "app.txt"), "v3", "utf-8");
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(stop.code).toBe(2);
+    });
+  });
+
+  it("restores the previous session_id along with the handoff when the session did no work", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      const file = await writeProgress(
+        dir,
+        progressDoc({ project: "SessionIdRestore", handoff: "clean", session_id: "earlier-session" })
+      );
+      await commitAll(dir, "init");
+      const sessionId = `sess-id-restore-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).session_id).toBe(sessionId);
+
+      await handleStop({ cwd: dir, session_id: sessionId });
+
+      const frontmatter = parseFrontmatter(await fs.readFile(file, "utf-8"));
+      expect(frontmatter.handoff).toBe("clean");
+      expect(frontmatter.session_id).toBe("earlier-session");
+    });
+  });
+});
+
+describe("cc-adapter project state writes", () => {
+  it("does not rewrite project-state.json when the project is already initialized", async () => {
+    await withTrackerHome(async (home) => {
+      const dir = await makeRepo();
+      await writeProgress(dir, progressDoc({ project: "StateOnce" }));
+      await handleSessionStart({ cwd: dir, session_id: `sess-state-a-${Date.now()}`, source: "startup" });
+      const statePath = path.join(home, "project-state.json");
+      const past = new Date(Date.now() - 60_000);
+      await fs.utimes(statePath, past, past);
+      const before = (await fs.stat(statePath)).mtimeMs;
+
+      await handleSessionStart({ cwd: dir, session_id: `sess-state-b-${Date.now()}`, source: "startup" });
+
+      expect((await fs.stat(statePath)).mtimeMs).toBe(before);
+    });
+  });
+});
+
+describe("cc-adapter session state cleanup", () => {
+  it("removes session state files older than 30 days at SessionStart", async () => {
+    await withTrackerHome(async () => {
+      const sessionsDir = path.join(os.tmpdir(), "awesome-progress-tracker", "sessions");
+      await fs.mkdir(sessionsDir, { recursive: true });
+      const oldFile = path.join(sessionsDir, `old-${Date.now()}.json`);
+      const recentFile = path.join(sessionsDir, `recent-${Date.now()}.json`);
+      await fs.writeFile(oldFile, "{}", "utf-8");
+      await fs.writeFile(recentFile, "{}", "utf-8");
+      const longAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+      await fs.utimes(oldFile, longAgo, longAgo);
+
+      const dir = await makeRepo();
+      await handleSessionStart({ cwd: dir, session_id: `sess-prune-${Date.now()}`, source: "startup" });
+      await handleSessionStart({ cwd: dir, session_id: `sess-prune-b-${Date.now()}`, source: "compact" });
+
+      await expect(fs.access(oldFile)).rejects.toThrow();
+      await expect(fs.access(recentFile)).resolves.toBeUndefined();
+    });
+  });
+});
+
+describe("cc-adapter session baseline", () => {
+  async function startedRepoWithEdit(sessionId: string): Promise<{ dir: string; file: string }> {
+    const dir = await makeRepo();
+    const file = await writeProgress(dir, progressDoc({ project: "Baseline" }));
+    await commitAll(dir, "init");
+    await handleSessionStart({ cwd: dir, session_id: sessionId, source: "startup" });
+    await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
+    const current = await fs.readFile(file, "utf-8");
+    await fs.writeFile(file, current.replace("Wire the widget.", "Wire the gadget."), "utf-8");
+    return { dir, file };
+  }
+
+  it("keeps the first baseline when SessionStart fires again after compaction", async () => {
+    await withTrackerHome(async () => {
+      const sessionId = `sess-compact-${Date.now()}`;
+      const { dir, file } = await startedRepoWithEdit(sessionId);
+
+      const restart = await handleSessionStart({ cwd: dir, session_id: sessionId, source: "compact" });
+      expect(restart.stdout).toContain("Wire the gadget.");
+      expect(restart.stdout).not.toContain("ended without a clean handoff");
+
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+      expect(stop.code).toBe(0);
+      expect(stop.stdout ?? "").not.toContain("was not updated");
+      expect(parseFrontmatter(await fs.readFile(file, "utf-8")).handoff).toBe("clean");
+    });
+  });
+
+  it("starts a fresh baseline when the session is resumed, not compacted", async () => {
+    await withTrackerHome(async () => {
+      const sessionId = `sess-resume-${Date.now()}`;
+      const { dir } = await startedRepoWithEdit(sessionId);
+
+      await handleSessionStart({ cwd: dir, session_id: sessionId, source: "resume" });
+      await fs.writeFile(path.join(dir, "more.txt"), "work after resume", "utf-8");
+
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+      expect(stop.code).toBe(2);
+      expect(stop.stderr).toContain("was not updated");
     });
   });
 });
@@ -1246,9 +1724,9 @@ describe("cc-adapter last runtime", () => {
     const dir = await makeRepo();
     const file = await writeProgress(dir, progressDoc({ project: "Fill", ...fields }));
     await commitAll(dir, "init");
-    if (extraFile) await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
     const sessionId = `fill-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     await handleSessionStart({ cwd: dir, session_id: sessionId });
+    if (extraFile) await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
     if (changeBody) {
       const current = await fs.readFile(file, "utf-8");
       await fs.writeFile(file, current.replace("Wire the widget.", "Ship the widget."), "utf-8");
@@ -1330,7 +1808,8 @@ describe("cc-adapter last runtime", () => {
       expect(stale.frontmatter.provider_last_used).toBe("unknown");
 
       const progressOnly = await freshStop({ provider_last_used: "unknown" }, "claude-code", true, false);
-      expect(progressOnly.frontmatter.handoff).toBe("interrupted");
+      // No work beyond progress files: nothing to stamp, and the start-of-session interrupted mark is put back.
+      expect(progressOnly.frontmatter.handoff).toBe("clean");
       expect(progressOnly.frontmatter.provider_last_used).toBe("unknown");
     });
   });

@@ -8,12 +8,11 @@ import { readProjectIndex, refreshProjectIndex, upsertIndexedProject } from "./i
 import { extractSection, parseFrontmatter, parseProjectSummary } from "./markdown.js";
 import { sha256 } from "../hash.js";
 import path from "node:path";
-import { ALLOWED_PROGRESS_SECTIONS, MAX_LAST_MILESTONE_LENGTH, MAX_SECTION_CONTENT_LENGTH, appendToArchive, foldDoneSection, replaceFrontmatterValue, replaceSectionWithOperation, updateArchiveFile, writeFileAtomic, ProgressConflictError, validateLastMilestone, validateSectionContent, validateSectionName } from "./writer.js";
+import { MAX_LAST_MILESTONE_LENGTH, MAX_SECTION_CONTENT_LENGTH, appendToArchive, foldDoneSection, replaceFrontmatterValue, replaceSectionWithOperation, updateArchiveFile, writeFileAtomic, ProgressConflictError, validateLastMilestone, validateSectionContent, validateSectionName, todayIso } from "./writer.js";
 import { listProjectTrackingStates, resetProjectTrackingState } from "../project-state.js";
-import { ALLOWED_GATE_VALUES, GATE_KEYS } from "../hook/schema.js";
+import { ALLOWED_GATE_VALUES, ALLOWED_PROGRESS_SECTIONS, ALLOWED_STATUSES, GATE_KEYS } from "../hook/schema.js";
 import { PACKAGE_VERSION } from "../package.js";
 const DEFAULT_EXCLUDES = DEFAULT_DISCOVERY_EXCLUDES;
-const PROJECT_STATUSES = ["idea", "active", "blocked", "paused", "done", "deployed", "archived"];
 const DEFAULT_MAX_PROJECTS = 50;
 const DEFAULT_MAX_STRING_LENGTH = 1000;
 const DEFAULT_MAX_INDEX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -118,6 +117,9 @@ function dedupeByProgressPath(projects) {
 // tried directly on disk. Unlike root scanning (which stays opt-in via PROJECT_PROGRESS_ROOTS
 // so an unconfigured server never silently reads the launch cwd), this only ever touches the
 // exact path the caller typed — it can't surface anything the caller didn't already name.
+function looksLikePath(selector) {
+    return path.isAbsolute(selector) || /[\\/]/.test(selector) || selector === "." || selector === "..";
+}
 async function resolveLiteralProgressPath(selector) {
     const base = path.resolve(selector);
     const candidates = [
@@ -145,25 +147,35 @@ async function resolveLiteralProgressPath(selector) {
 export async function resolveProject(selector) {
     const index = await readProjectIndex();
     let candidates = dedupeByProgressPath(index.projects.filter((project) => matchesSelector(project, selector)));
+    // Checkouts outside PROJECT_PROGRESS_ROOTS (a fresh clone, a benchmark fixture, a temp
+    // worktree) are invisible to root scanning by design. If the caller named a path to one,
+    // honor it directly instead of forcing a re-install just to move Progress.md (ADR 0023).
+    const literalCandidates = async () => {
+        const literalPath = await resolveLiteralProgressPath(selector);
+        if (!literalPath)
+            return [];
+        const project = parseProjectSummary(await fs.readFile(literalPath, "utf-8"), literalPath);
+        await upsertIndexedProject(project);
+        return [project];
+    };
+    // A path-shaped selector skips the root walk. A bare name is tried as a folder under the server
+    // cwd only after discovery, so a same-named folder there cannot shadow a project in the roots.
+    const pathShaped = looksLikePath(selector);
+    if (candidates.length === 0 && pathShaped)
+        candidates = await literalCandidates();
     if (candidates.length === 0) {
         const discovered = await discoverProjects({
             projectRoots: rootsFromEnv(),
             exclude: DEFAULT_EXCLUDES
         });
         candidates = dedupeByProgressPath(discovered.filter((project) => matchesSelector(project, selector)));
-    }
-    // Checkouts outside PROJECT_PROGRESS_ROOTS (a fresh clone, a benchmark fixture, a temp
-    // worktree) are invisible to root scanning by design. If the caller named an exact path to
-    // one, honor it directly instead of forcing a re-install just to move Progress.md.
-    if (candidates.length === 0) {
-        const literalPath = await resolveLiteralProgressPath(selector);
-        if (literalPath) {
-            const markdown = await fs.readFile(literalPath, "utf-8");
-            const project = parseProjectSummary(markdown, literalPath);
-            await upsertIndexedProject(project);
-            candidates = [project];
+        // Remember what the walk found so the next call does not repeat it.
+        for (const project of candidates) {
+            await upsertIndexedProject(project).catch(() => undefined);
         }
     }
+    if (candidates.length === 0 && !pathShaped)
+        candidates = await literalCandidates();
     if (candidates.length === 0) {
         const normalized = selector.toLowerCase();
         const suggestions = index.projects
@@ -236,11 +248,9 @@ export async function archiveFoldedItems(progressPath, items) {
         };
     }
 }
-// Deliberately does NOT route through textResult. That helper collapses any
-// payload carrying a string `error` into errorResult("invalid_request", ...),
-// which would discard currentContent and currentFrontmatter — the entire
-// reason the conflict payload exists. The result is built directly so the
-// merge data survives to the caller, while isError still marks the failure.
+// Built directly rather than through invalidRequest/errorResult, which would discard currentContent and
+// currentFrontmatter — the entire reason the conflict payload exists. The merge data survives to the
+// caller while isError still marks the failure.
 async function conflictResult(error, progressPath, options) {
     if (!(error instanceof ProgressConflictError))
         throw error;
@@ -276,29 +286,29 @@ export function errorResult(code, message, hint) {
         isError: true
     };
 }
-function textResult(text) {
-    try {
-        const parsed = JSON.parse(text);
-        if (typeof parsed.error === "string") {
-            return errorResult("invalid_request", parsed.error, "Correct the request and retry.");
-        }
-        return successResult(parsed, text);
-    }
-    catch {
-        return successResult({ message: text }, text);
-    }
+function invalidRequest(message) {
+    return errorResult("invalid_request", message, "Correct the request and retry.");
+}
+function jsonResult(payload) {
+    return successResult(payload, JSON.stringify(payload));
 }
 export function createServer() {
     const server = new McpServer({ name: "breadcrumbs", version: PACKAGE_VERSION });
     server.registerTool("list_projects", {
         description: "List compact summaries from the cached project index. Filter by status when needed.",
         inputSchema: {
-            status: z.enum(PROJECT_STATUSES).optional()
+            status: z.enum(ALLOWED_STATUSES).optional()
         }
-    }, async ({ status }) => textResult(await projectsJson(status ? (projectStatus) => projectStatus === status : undefined)));
+    }, async ({ status }) => {
+        const text = await projectsJson(status ? (projectStatus) => projectStatus === status : undefined);
+        return successResult(JSON.parse(text), text);
+    });
     server.registerTool("refresh_projects", {
         description: "Refresh the project index by scanning PROJECT_PROGRESS_ROOTS for project-progress/Progress.md files."
-    }, async () => textResult(await refreshProjectsJson()));
+    }, async () => {
+        const text = await refreshProjectsJson();
+        return successResult(JSON.parse(text), text);
+    });
     server.registerTool("read_project_progress", {
         description: "Read one compact project progress summary.",
         inputSchema: {
@@ -307,8 +317,16 @@ export function createServer() {
     }, async ({ project }) => {
         const resolution = await resolveProject(project);
         if (resolution.error)
-            return textResult(JSON.stringify({ error: resolution.error }));
-        return textResult(JSON.stringify(boundProjectSummaries([resolution.project])[0]));
+            return invalidRequest(resolution.error);
+        // The index is a cache that only MCP writes refresh; resuming from it would hide hand edits to Progress.md.
+        let current;
+        try {
+            current = parseProjectSummary(await fs.readFile(resolution.project.progressPath, "utf-8"), resolution.project.progressPath);
+        }
+        catch {
+            return errorResult("read_failed", `Could not read ${resolution.project.progressPath}.`, "Check that the file exists, or run refresh_projects.");
+        }
+        return jsonResult(boundProjectSummaries([current])[0]);
     });
     server.registerTool("update_project_progress", {
         description: "Replace or append a named section in a project's Progress.md.",
@@ -320,13 +338,13 @@ export function createServer() {
     }, async ({ project, section, content }) => {
         const sectionError = validateSectionName(section);
         if (sectionError)
-            return textResult(JSON.stringify({ error: sectionError }));
+            return invalidRequest(sectionError);
         const contentError = validateSectionContent(content);
         if (contentError)
-            return textResult(JSON.stringify({ error: contentError }));
+            return invalidRequest(contentError);
         const resolution = await resolveProject(project);
         if (resolution.error)
-            return textResult(JSON.stringify({ error: resolution.error }));
+            return invalidRequest(resolution.error);
         const match = resolution.project;
         const markdown = await fs.readFile(match.progressPath, "utf-8");
         const expectedHash = sha256(markdown);
@@ -338,7 +356,7 @@ export function createServer() {
             archived = fold.archived;
         }
         const result = replaceSectionWithOperation(markdown, section, sectionContent);
-        const updated = result.markdown;
+        const updated = replaceFrontmatterValue(result.markdown, "updated", todayIso());
         try {
             await writeFileAtomic(match.progressPath, updated, expectedHash);
         }
@@ -348,7 +366,7 @@ export function createServer() {
         // Right after the guarded write lands (ADR 0020), before anything else that can throw.
         const archive = await archiveFoldedItems(match.progressPath, archived);
         await upsertIndexedProject(parseProjectSummary(updated, match.progressPath));
-        return textResult(JSON.stringify({
+        return jsonResult({
             updated: true,
             operation: result.operation,
             project,
@@ -357,27 +375,27 @@ export function createServer() {
             ...archive,
             updatedAt: new Date().toISOString(),
             progressPath: match.progressPath
-        }));
+        });
     });
     server.registerTool("mark_project_status", {
         description: "Update frontmatter status and last_milestone in a project's Progress.md.",
         inputSchema: {
             project: projectSelectorSchema,
-            status: z.enum(PROJECT_STATUSES),
+            status: z.enum(ALLOWED_STATUSES),
             last_milestone: lastMilestoneSchema
         }
     }, async ({ project, status, last_milestone }) => {
         const milestoneError = validateLastMilestone(last_milestone);
         if (milestoneError)
-            return textResult(JSON.stringify({ error: milestoneError }));
+            return invalidRequest(milestoneError);
         const resolution = await resolveProject(project);
         if (resolution.error)
-            return textResult(JSON.stringify({ error: resolution.error }));
+            return invalidRequest(resolution.error);
         const match = resolution.project;
         const markdown = await fs.readFile(match.progressPath, "utf-8");
         const expectedHash = sha256(markdown);
         const withStatus = replaceFrontmatterValue(markdown, "status", status);
-        const updated = replaceFrontmatterValue(withStatus, "last_milestone", last_milestone);
+        const updated = replaceFrontmatterValue(replaceFrontmatterValue(withStatus, "last_milestone", last_milestone), "updated", todayIso());
         try {
             await writeFileAtomic(match.progressPath, updated, expectedHash);
         }
@@ -387,7 +405,7 @@ export function createServer() {
             });
         }
         await upsertIndexedProject(parseProjectSummary(updated, match.progressPath));
-        return textResult(JSON.stringify({ updated: true, project, status, progressPath: match.progressPath }));
+        return jsonResult({ updated: true, project, status, progressPath: match.progressPath });
     });
     server.registerTool("set_project_gates", {
         description: "Set verification gates (implementation, tests, review, deploy) in a project's Progress.md frontmatter. Only supplied gates are written.",
@@ -401,11 +419,11 @@ export function createServer() {
     }, async ({ project, implementation, tests, review, deploy }) => {
         const updates = gateFrontmatterUpdates({ implementation, tests, review, deploy });
         if (updates.length === 0) {
-            return textResult(JSON.stringify({ error: "at least one gate must be supplied" }));
+            return invalidRequest("at least one gate must be supplied");
         }
         const resolution = await resolveProject(project);
         if (resolution.error)
-            return textResult(JSON.stringify({ error: resolution.error }));
+            return invalidRequest(resolution.error);
         const match = resolution.project;
         const markdown = await fs.readFile(match.progressPath, "utf-8");
         const expectedHash = sha256(markdown);
@@ -413,6 +431,7 @@ export function createServer() {
         for (const [key, value] of updates) {
             updated = replaceFrontmatterValue(updated, key, value);
         }
+        updated = replaceFrontmatterValue(updated, "updated", todayIso());
         try {
             await writeFileAtomic(match.progressPath, updated, expectedHash);
         }
@@ -421,12 +440,13 @@ export function createServer() {
                 keys: updates.map(([key]) => key)
             });
         }
-        return textResult(JSON.stringify({
+        await upsertIndexedProject(parseProjectSummary(updated, match.progressPath));
+        return jsonResult({
             updated: true,
             project,
             gates: Object.fromEntries(updates),
             progressPath: match.progressPath
-        }));
+        });
     });
     return server;
 }

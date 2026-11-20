@@ -5,11 +5,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { parseProjectSummary } from "./mcp/markdown.js";
-import { upsertIndexedProject } from "./mcp/index.js";
+import { pathExists } from "./fs-util.js";
+import { indexDir, upsertIndexedProject } from "./mcp/index.js";
 import { main as runMcpServer } from "./mcp/server.js";
 import { sha256 } from "./hash.js";
 import { planCompaction, readProgressFiles, applyArchive } from "./compact.js";
-import { ProgressConflictError, updateArchiveFile, writeFileAtomic } from "./mcp/writer.js";
+import { ProgressConflictError, todayIso, updateArchiveFile, writeFileAtomic } from "./mcp/writer.js";
 import { PACKAGE_ROOT, PACKAGE_VERSION } from "./package.js";
 import { listProjectTrackingStates, resetProjectTrackingState, setProjectTrackingState } from "./project-state.js";
 const execFileAsync = promisify(execFile);
@@ -106,21 +107,9 @@ Environment:
   PROJECT_PROGRESS_ROOTS  Semicolon-separated roots scanned by the MCP server.
 `;
 }
-function todayIso() {
-    return new Date().toISOString().slice(0, 10);
-}
 function inferProjectName(targetRoot) {
     const name = path.basename(path.resolve(targetRoot));
     return name || "Project";
-}
-async function pathExists(filePath) {
-    try {
-        await fs.access(filePath);
-        return true;
-    }
-    catch {
-        return false;
-    }
 }
 function replaceTemplateValues(markdown, options) {
     return markdown
@@ -134,9 +123,6 @@ export async function initProject(options = {}) {
     const projectName = options.projectName ?? inferProjectName(targetRoot);
     const today = options.today ?? todayIso();
     const targetProgressDir = path.join(targetRoot, "project-progress");
-    if ((await pathExists(targetProgressDir)) && !options.force) {
-        throw new Error(`project-progress already exists at ${targetProgressDir}. Use --force to overwrite template files.`);
-    }
     await fs.mkdir(targetProgressDir, { recursive: true });
     const entries = await fs.readdir(TEMPLATE_DIR, { withFileTypes: true });
     const createdFiles = [];
@@ -145,12 +131,15 @@ export async function initProject(options = {}) {
             continue;
         const sourcePath = path.join(TEMPLATE_DIR, entry.name);
         const targetPath = path.join(targetProgressDir, entry.name);
-        if ((await pathExists(targetPath)) && !options.force) {
-            throw new Error(`${targetPath} already exists. Use --force to overwrite template files.`);
-        }
+        // Without --force, never touch what is already there: filling in a missing Progress.md must not wipe the log.
+        if ((await pathExists(targetPath)) && !options.force)
+            continue;
         const source = await fs.readFile(sourcePath, "utf-8");
         await fs.writeFile(targetPath, replaceTemplateValues(source, { projectName, targetRoot, today }), "utf-8");
         createdFiles.push(targetPath);
+    }
+    if (createdFiles.length === 0 && !options.force) {
+        throw new Error(`project-progress already exists at ${targetProgressDir}. Use --force to overwrite template files.`);
     }
     return { targetProgressDir, createdFiles };
 }
@@ -622,11 +611,12 @@ async function checkNpx() {
         return { name: "npx", ok: false, message: "npx is not available on PATH" };
     }
 }
+// homeDir is only an explicit override; left undefined this follows AWESOME_PROGRESS_TRACKER_HOME like the index does.
 async function checkIndexWritable(homeDir) {
-    const dir = path.join(homeDir, ".awesome-progress-tracker");
+    const dir = indexDir(homeDir);
     try {
         await fs.mkdir(dir, { recursive: true });
-        await fs.access(dir);
+        await fs.access(dir, fs.constants.W_OK);
         return { name: "index", ok: true, message: `${dir} is available` };
     }
     catch {
@@ -712,7 +702,7 @@ export async function runDoctor(options = {}) {
             { name: "skill", ok: skillInstalled, message: skillMessage },
             { name: "mcp", ok: mcpConfigured, message: mcpMessage },
             { name: "mcp-connection", ok: mcpConnectionOk, message: mcpConnectionMessage },
-            await checkIndexWritable(homeDir),
+            await checkIndexWritable(options.homeDir),
             {
                 name: "project",
                 ok: true,
@@ -740,7 +730,7 @@ export async function runDoctor(options = {}) {
             ok: status.mcpConfigured,
             message: status.mcpConfigured ? "MCP config is installed" : "MCP config is missing"
         },
-        await checkIndexWritable(homeDir),
+        await checkIndexWritable(options.homeDir),
         {
             name: "project",
             ok: true,

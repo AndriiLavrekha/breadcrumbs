@@ -26,6 +26,19 @@ export const ALLOWED_STATUSES = [
 
 export const ALLOWED_SENSITIVITY = ["normal", "private", "sensitive"] as const;
 
+export const ALLOWED_PROGRESS_SECTIONS = [
+  "Resume Snapshot",
+  "Current State",
+  "Last Session",
+  "Next Action",
+  "Remaining Work",
+  "Done",
+  "Blockers",
+  "Deployment",
+  "Completion Criteria",
+  "Resume Instructions"
+] as const;
+
 export const GATE_KEYS = [
   "gate_implementation",
   "gate_tests",

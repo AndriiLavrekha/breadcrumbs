@@ -2,6 +2,8 @@
 
 Validate a real install with Claude Code and Codex. Use temporary projects first, then repeat the important scenarios on one real project.
 
+For the per-release checklist across Claude Code, Codex, Antigravity and Hermes, see [`MANUAL_TESTING.md`](MANUAL_TESTING.md).
+
 ## Preflight
 
 ```bash
@@ -74,20 +76,6 @@ Ask: `Use Breadcrumbs MCP to update the Next Action for project <project name> t
 **Expected:** the matching project's `Progress.md` and the global index both update; no unrelated project changes.
 
 **Broken if:** MCP updates the wrong project, or the Markdown and index fall out of sync in either direction.
-
-## Scenario 6: Hook Check
-
-```powershell
-# Windows
-./hooks/project-progress-check.ps1 -ProjectRoot . -SessionStartedAt 2026-06-28T00:00:00+00:00 -MeaningfulWork -CompletionBoundary
-```
-
-```bash
-# POSIX
-./hooks/project-progress-check.sh --project-root . --session-started-at 2026-06-28T00:00:00+00:00 --meaningful-work --completion-boundary
-```
-
-**Expected:** exit `0` when progress is valid/current; nonzero when required files are missing at a completion boundary; warnings/failures for stale progress after meaningful work.
 
 ## Scenario 6A: Codex SessionStart Hook Smoke
 

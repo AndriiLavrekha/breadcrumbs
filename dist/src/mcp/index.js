@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathExists, writeTextAtomic } from "../fs-util.js";
 import { discoverProjects } from "./discovery.js";
 function defaultHomeDir() {
     return process.env.AWESOME_PROGRESS_TRACKER_HOME ?? os.homedir();
@@ -13,15 +14,6 @@ export function indexJsonPath(homeDir = defaultHomeDir()) {
 }
 export function indexMarkdownPath(homeDir = defaultHomeDir()) {
     return path.join(indexDir(homeDir), "Projects.md");
-}
-async function pathExists(filePath) {
-    try {
-        await fs.access(filePath);
-        return true;
-    }
-    catch {
-        return false;
-    }
 }
 function sortProjects(projects) {
     return [...projects].sort((left, right) => left.project.localeCompare(right.project));
@@ -80,7 +72,17 @@ export async function readProjectIndex(options = {}) {
             projects: []
         };
     }
-    const parsed = JSON.parse(await fs.readFile(filePath, "utf-8"));
+    // The index is only a cache of what discovery can rebuild, so an unreadable file must not take every tool down.
+    let parsed;
+    try {
+        parsed = JSON.parse(await fs.readFile(filePath, "utf-8"));
+    }
+    catch {
+        parsed = null;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { schemaVersion: 1, updatedAt: "", projects: [] };
+    }
     return {
         schemaVersion: 1,
         updatedAt: String(parsed.updatedAt ?? ""),
@@ -90,9 +92,9 @@ export async function readProjectIndex(options = {}) {
 export async function writeProjectIndex(index, options = {}) {
     const dir = indexDir(options.homeDir);
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(indexJsonPath(options.homeDir), `${JSON.stringify(index, null, 2)}\n`, "utf-8");
+    await writeTextAtomic(indexJsonPath(options.homeDir), `${JSON.stringify(index, null, 2)}\n`);
     if (options.writeMarkdown !== false) {
-        await fs.writeFile(indexMarkdownPath(options.homeDir), renderProjectsMarkdown(index), "utf-8");
+        await writeTextAtomic(indexMarkdownPath(options.homeDir), renderProjectsMarkdown(index));
     }
 }
 export async function refreshProjectIndex(projectRoots, exclude, options = {}) {

@@ -39,19 +39,17 @@
     "bench:build": "tsc -p bench/tsconfig.json",
     "bench": "npm run bench:build && node bench/dist/harness/cli.js",
     "build": "tsc -p tsconfig.json",
-    "build:mcp": "tsc -p tsconfig.json",
     "mcp": "node dist/src/mcp/server.js",
-    "hook": "node dist/src/hook/cli.js",
     "prepare": "npm run build",
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "latest",
-    "zod": "latest"
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/node": "latest",
-    "typescript": "latest",
-    "vitest": "latest"
+    "@types/node": "26.0.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.12"
   }
 }

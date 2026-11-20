@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # dist/ is committed and plugin installs run it with no build step, so a stale dist reaches users.
+      # Rebuilding from empty also exposes outputs of deleted sources, and `git status` catches new untracked files.
+      - run: rm -rf dist && npm run build
+      - run: test -z "$(git status --porcelain -- dist)"
