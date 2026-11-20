@@ -48,10 +48,10 @@ Exact helper names and placement; test file layout under `tests/hook`, `tests/mc
 
 Branch `fix/audit-deferred-minors` fixes the minors the final review deferred:
 
-- Stop reads the HEAD reflog from the offset recorded at start, so switching branches, reset, pull and fast-forward merges are not work, and the first commit of an empty repository is.
+- Stop reads the HEAD reflog from the offset recorded at start. Switching branches, reset, pull, clone, fast-forward merges and rebase start/finish lines are not work; every other action is, so an unknown variant errs toward the reminder. The first commit of an empty repository counts.
 - Uncommitted work is a change against a tree fingerprint taken at start (as in ADR 0007 for Hermes), so leftovers from an earlier session do not make a read-only session look like work.
 - A read-only session restores the `session_id` it found, along with the handoff.
-- `set_project_gates` refreshes the index; a `projects.json` holding `null` reads as empty; a bare project name is never read as a folder under the server cwd.
+- `set_project_gates` refreshes the index; a `projects.json` holding `null` reads as empty; a bare project name is tried as a folder under the server cwd only after root discovery (ADR 0023 order), so a same-named folder there cannot shadow a project in the roots.
 - Item 8 now has a `.gitattributes` (`* text=auto eol=lf`), so a Windows build matches the committed `dist/`.
 
 Still open: pathspec magic such as `:(glob)` in `git add` is not understood by the commit guard, and the `project-state.json` lost-update race is accepted.

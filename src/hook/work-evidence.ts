@@ -10,10 +10,11 @@ export function isProgressFile(relativePath: string): boolean {
   return relativePath.startsWith("project-progress/") || relativePath.includes("/project-progress/");
 }
 
-// HEAD reflog actions that record a commit written here. checkout/switch, reset, pull and fast-forward merges
-// move HEAD without new work; rebase start/finish/abort lines only bracket the picks.
-const AUTHORING_ACTION =
-  /^(?:commit(?: \([a-z]+\))?|cherry-pick|revert|rebase(?: -i)? \((?!start|finish|abort)[a-z]+\)): |^merge [^:]*: (?!Fast-forward)/;
+// HEAD reflog actions that move HEAD without writing a commit here: switching branches, reset, pull, clone,
+// fast-forward merges, and the lines that bracket a rebase. Every other action counts as a commit, so a
+// variant this list has never seen errs toward the reminder rather than toward missed work.
+const NON_AUTHORING_ACTION =
+  /^(?:checkout|reset|pull|initial pull|clone|merge [^:]*: Fast-forward|rebase(?: -i)? \((?:start|finish|abort)\))/;
 
 function headReflogPath(cwd: string): string | undefined {
   const out = git(cwd, ["rev-parse", "--git-path", "logs/HEAD"])?.trim();
@@ -33,6 +34,8 @@ export async function headReflogSize(cwd: string): Promise<number | undefined> {
 
 // Whether a commit was written since the reflog had `offset` bytes. undefined when the reflog cannot tell
 // (no git, reflogs disabled, or expired below the offset); callers then fall back to comparing HEAD.
+// shortcut: a reflog expired mid-session that regrows past the offset is read from a misaligned point,
+// record its first line too if sessions long enough to span `git gc` reflog expiry turn up.
 export async function committedSince(cwd: string, offset: number): Promise<boolean | undefined> {
   const file = headReflogPath(cwd);
   if (!file) return undefined;
@@ -50,7 +53,7 @@ export async function committedSince(cwd: string, offset: number): Promise<boole
     return buffer
       .toString("utf-8")
       .split("\n")
-      .some((line) => AUTHORING_ACTION.test(line.slice(line.indexOf("\t") + 1)));
+      .some((line) => line.trim() !== "" && !NON_AUTHORING_ACTION.test(line.slice(line.indexOf("\t") + 1)));
   } finally {
     await handle.close();
   }

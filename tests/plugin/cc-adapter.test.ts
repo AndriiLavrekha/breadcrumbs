@@ -1391,7 +1391,7 @@ describe("cc-adapter session handoff", () => {
     });
   });
 
-  it("does not count switching branches or a fast-forward merge as work", async () => {
+  it("does not count switching branches, a fast-forward merge or a reset as work", async () => {
     await withTrackerHome(async () => {
       const dir = await makeRepo();
       const file = await writeProgress(dir, progressDoc({ project: "ReadOnlyMoves", handoff: "clean" }));
@@ -1406,6 +1406,7 @@ describe("cc-adapter session handoff", () => {
       execFileSync("git", ["switch", "-q", "other"], { cwd: dir, stdio: "ignore" });
       execFileSync("git", ["switch", "-q", "main"], { cwd: dir, stdio: "ignore" });
       execFileSync("git", ["merge", "-q", "--ff-only", "other"], { cwd: dir, stdio: "ignore" });
+      execFileSync("git", ["reset", "-q", "--hard", "HEAD~1"], { cwd: dir, stdio: "ignore" });
       const stop = await handleStop({ cwd: dir, session_id: sessionId });
 
       expect(stop.code).toBe(0);
@@ -1424,6 +1425,55 @@ describe("cc-adapter session handoff", () => {
       await fs.writeFile(path.join(dir, "src.txt"), "work", "utf-8");
       execFileSync("git", ["add", "src.txt"], { cwd: dir, stdio: "ignore" });
       execFileSync("git", ["commit", "-q", "--amend", "--no-edit"], { cwd: dir, stdio: "ignore" });
+      const stop = await handleStop({ cwd: dir, session_id: sessionId });
+
+      expect(stop.code).toBe(2);
+    });
+  });
+
+  it("takes the git work snapshots only in a project with Progress.md", async () => {
+    await withTrackerHome(async () => {
+      const bare = await makeRepo();
+      const tracked = await makeRepo();
+      await writeProgress(tracked, progressDoc({ project: "Snapshots" }));
+      const bareId = `sess-snap-bare-${Date.now()}`;
+      const trackedId = `sess-snap-tracked-${Date.now()}`;
+
+      await handleSessionStart({ cwd: bare, session_id: bareId });
+      await handleSessionStart({ cwd: tracked, session_id: trackedId });
+
+      const bareState = JSON.parse(await fs.readFile(sessionStatePathFor(bareId), "utf-8"));
+      const trackedState = JSON.parse(await fs.readFile(sessionStatePathFor(trackedId), "utf-8"));
+      expect(bareState.treeAtStart).toBeUndefined();
+      expect(bareState.reflogBytesAtStart).toBeUndefined();
+      expect(trackedState.treeAtStart).toEqual(expect.any(String));
+      expect(trackedState.reflogBytesAtStart).toEqual(expect.any(Number));
+    });
+  });
+
+  it("counts finishing a conflicted cherry-pick with git commit as work", async () => {
+    await withTrackerHome(async () => {
+      const dir = await makeRepo();
+      await writeProgress(dir, progressDoc({ project: "CherryPick" }));
+      await fs.writeFile(path.join(dir, "f.txt"), "base", "utf-8");
+      await commitAll(dir, "init");
+      execFileSync("git", ["switch", "-q", "-c", "side"], { cwd: dir, stdio: "ignore" });
+      await fs.writeFile(path.join(dir, "f.txt"), "side", "utf-8");
+      await commitAll(dir, "side");
+      execFileSync("git", ["switch", "-q", "main"], { cwd: dir, stdio: "ignore" });
+      await fs.writeFile(path.join(dir, "f.txt"), "mine", "utf-8");
+      await commitAll(dir, "mine");
+      const sessionId = `sess-cherry-${Date.now()}`;
+      await handleSessionStart({ cwd: dir, session_id: sessionId });
+
+      try {
+        execFileSync("git", ["cherry-pick", "side"], { cwd: dir, stdio: "ignore" });
+      } catch {
+        // conflict expected
+      }
+      await fs.writeFile(path.join(dir, "f.txt"), "resolved", "utf-8");
+      execFileSync("git", ["add", "f.txt"], { cwd: dir, stdio: "ignore" });
+      execFileSync("git", ["commit", "-q", "--no-edit"], { cwd: dir, stdio: "ignore" });
       const stop = await handleStop({ cwd: dir, session_id: sessionId });
 
       expect(stop.code).toBe(2);

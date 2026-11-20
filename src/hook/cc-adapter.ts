@@ -151,7 +151,8 @@ async function recordSessionStart(
   sessionId: string | undefined,
   cwd: string,
   source: string | undefined,
-  atStart: HandoffFields
+  atStart: HandoffFields,
+  tracked: boolean
 ): Promise<boolean> {
   if (!sessionId) return true;
   try {
@@ -163,8 +164,9 @@ async function recordSessionStart(
       startedAt: new Date().toISOString(),
       cwd,
       headAtStart: currentHead(cwd),
-      reflogBytesAtStart: await headReflogSize(cwd),
-      treeAtStart: await treeFingerprint(cwd),
+      // Stop does nothing without Progress.md, so skip the git scans there; a project initialized mid-session
+      // falls back to comparing HEAD and a clean tree.
+      ...(tracked ? { reflogBytesAtStart: await headReflogSize(cwd), treeAtStart: await treeFingerprint(cwd) } : {}),
       handoffAtStart: atStart.handoff,
       sessionIdAtStart: atStart.sessionId
     });
@@ -310,9 +312,10 @@ export async function handleSessionStart(event: HookEvent): Promise<HookResult> 
   const cwd = event.cwd ?? process.cwd();
   const progressPath = progressPathFor(cwd);
   await pruneSessionState();
-  const fresh = await recordSessionStart(event.session_id, cwd, event.source, await readHandoffFields(progressPath));
+  const tracked = await pathExists(progressPath);
+  const fresh = await recordSessionStart(event.session_id, cwd, event.source, await readHandoffFields(progressPath), tracked);
 
-  if (!(await pathExists(progressPath))) {
+  if (!tracked) {
     return await initializationGuidance(cwd, "SessionStart");
   }
 

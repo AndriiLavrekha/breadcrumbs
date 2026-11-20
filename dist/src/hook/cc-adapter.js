@@ -99,7 +99,7 @@ async function readHandoffFields(progressPath) {
 // Returns false when this start only repeats one already recorded: Claude Code re-runs SessionStart after
 // compaction (source "compact"), and that must not reset the baseline Stop compares Progress.md against.
 // Docs do not say whether session_id survives compaction; a new id simply gets a fresh baseline.
-async function recordSessionStart(sessionId, cwd, source, atStart) {
+async function recordSessionStart(sessionId, cwd, source, atStart, tracked) {
     if (!sessionId)
         return true;
     try {
@@ -112,8 +112,9 @@ async function recordSessionStart(sessionId, cwd, source, atStart) {
             startedAt: new Date().toISOString(),
             cwd,
             headAtStart: currentHead(cwd),
-            reflogBytesAtStart: await headReflogSize(cwd),
-            treeAtStart: await treeFingerprint(cwd),
+            // Stop does nothing without Progress.md, so skip the git scans there; a project initialized mid-session
+            // falls back to comparing HEAD and a clean tree.
+            ...(tracked ? { reflogBytesAtStart: await headReflogSize(cwd), treeAtStart: await treeFingerprint(cwd) } : {}),
             handoffAtStart: atStart.handoff,
             sessionIdAtStart: atStart.sessionId
         });
@@ -249,8 +250,9 @@ export async function handleSessionStart(event) {
     const cwd = event.cwd ?? process.cwd();
     const progressPath = progressPathFor(cwd);
     await pruneSessionState();
-    const fresh = await recordSessionStart(event.session_id, cwd, event.source, await readHandoffFields(progressPath));
-    if (!(await pathExists(progressPath))) {
+    const tracked = await pathExists(progressPath);
+    const fresh = await recordSessionStart(event.session_id, cwd, event.source, await readHandoffFields(progressPath), tracked);
+    if (!tracked) {
         return await initializationGuidance(cwd, "SessionStart");
     }
     await bestEffortSetProjectState(cwd, "initialized");
