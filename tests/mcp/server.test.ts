@@ -637,6 +637,23 @@ describe("MCP server file-backed tools", () => {
     }
   });
 
+  it("resolveProject still resolves a bare folder name under the server cwd when nothing else matches", async () => {
+    const decoy = await fs.mkdtemp(path.join(process.cwd(), "pp-bare-"));
+    try {
+      await fs.mkdir(path.join(decoy, "project-progress"), { recursive: true });
+      const { file } = await projectOnDisk();
+      await fs.copyFile(file, path.join(decoy, "project-progress", "Progress.md"));
+      await withIndex([], async () => {
+        const resolution = await resolveProject(path.basename(decoy));
+
+        expect(resolution.error).toBeUndefined();
+        expect(resolution.project?.progressPath).toBe(path.join(decoy, "project-progress", "Progress.md"));
+      });
+    } finally {
+      await fs.rm(decoy, { recursive: true, force: true });
+    }
+  });
+
   it("resolveProject saves projects found by scanning roots", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "pp-mcp-root-"));
     const { summary } = await projectOnDisk(root);

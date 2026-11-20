@@ -148,19 +148,21 @@ export async function resolveProject(selector) {
     const index = await readProjectIndex();
     let candidates = dedupeByProgressPath(index.projects.filter((project) => matchesSelector(project, selector)));
     // Checkouts outside PROJECT_PROGRESS_ROOTS (a fresh clone, a benchmark fixture, a temp
-    // worktree) are invisible to root scanning by design. If the caller named an exact path to
-    // one, honor it directly instead of forcing a re-install just to move Progress.md.
-    // A bare name is a project name: reading it as a folder under the server's cwd would let any
-    // same-named folder there shadow the project the caller meant, so only path-shaped selectors go to disk.
-    if (candidates.length === 0 && looksLikePath(selector)) {
+    // worktree) are invisible to root scanning by design. If the caller named a path to one,
+    // honor it directly instead of forcing a re-install just to move Progress.md (ADR 0023).
+    const literalCandidates = async () => {
         const literalPath = await resolveLiteralProgressPath(selector);
-        if (literalPath) {
-            const markdown = await fs.readFile(literalPath, "utf-8");
-            const project = parseProjectSummary(markdown, literalPath);
-            await upsertIndexedProject(project);
-            candidates = [project];
-        }
-    }
+        if (!literalPath)
+            return [];
+        const project = parseProjectSummary(await fs.readFile(literalPath, "utf-8"), literalPath);
+        await upsertIndexedProject(project);
+        return [project];
+    };
+    // A path-shaped selector skips the root walk. A bare name is tried as a folder under the server
+    // cwd only after discovery, so a same-named folder there cannot shadow a project in the roots.
+    const pathShaped = looksLikePath(selector);
+    if (candidates.length === 0 && pathShaped)
+        candidates = await literalCandidates();
     if (candidates.length === 0) {
         const discovered = await discoverProjects({
             projectRoots: rootsFromEnv(),
@@ -172,6 +174,8 @@ export async function resolveProject(selector) {
             await upsertIndexedProject(project).catch(() => undefined);
         }
     }
+    if (candidates.length === 0 && !pathShaped)
+        candidates = await literalCandidates();
     if (candidates.length === 0) {
         const normalized = selector.toLowerCase();
         const suggestions = index.projects
