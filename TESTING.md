@@ -2,6 +2,8 @@
 
 Validate a real install with Claude Code and Codex. Use temporary projects first, then repeat the important scenarios on one real project.
 
+For the per-release checklist across Claude Code, Codex, Antigravity and Hermes, see [`MANUAL_TESTING.md`](MANUAL_TESTING.md).
+
 ## Preflight
 
 ```bash

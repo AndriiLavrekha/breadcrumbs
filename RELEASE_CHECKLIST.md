@@ -1,5 +1,7 @@
 # Release Checklist
 
+Every release: `npm test`, `npm run typecheck` and `npm run build` pass, CI is green, and every check in [`MANUAL_TESTING.md`](MANUAL_TESTING.md) has a recorded result for Claude Code, Codex CLI, Antigravity and Hermes Agent.
+
 ## Breadcrumbs v0.8.0 identity release
 
 - [x] Both plugin and marketplace manifests identify `breadcrumbs`; install selector `breadcrumbs@breadcrumbs`.
