@@ -68,6 +68,12 @@ describe("summarizeProblems", () => {
   it("omits the command when none applies", () => {
     expect(summarizeProblems(["a"], undefined)).toBe("Progress file problems: a.");
   });
+
+  it("gives an agent prompt when the fix is an edit, not a compact", () => {
+    const text = summarizeProblems(["Progress.md is 16 KB after compact (budget 16 KB); shorten long sections"], undefined, true);
+    expect(text).toContain("ask the agent:");
+    expect(text).toContain("Session Log.md");
+  });
 });
 
 describe("checkProgressHealth", () => {

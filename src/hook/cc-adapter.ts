@@ -13,7 +13,7 @@ import { renderDrift, renderGates } from "./checkpoint-render.js";
 import { checkFreshness } from "./freshness.js";
 import { analyzeGitCommand } from "./git-command.js";
 import { CLEAN_TREE, committedSince, headReflogSize, treeFingerprint } from "./work-evidence.js";
-import { checkProgressHealth, summarizeProblems, validateProgressFile } from "./validator.js";
+import { checkProgressHealth, EDIT_HINT, summarizeProblems, validateProgressFile } from "./validator.js";
 import type { HealthFinding } from "./validator.js";
 
 // Adapter that bridges Claude Code hook events (JSON on stdin) to the Breadcrumbs
@@ -338,7 +338,8 @@ export async function handleSessionStart(event: HookEvent): Promise<HookResult> 
   const health = await bestEffortHealth(progressPath);
   if (health.length > 0) {
     const command = health.some((finding) => finding.remedy === "compact") ? ` — run ${compactCommand(cwd)}` : "";
-    lines.push(`\nProgress health: ${boundedContext(health.map((finding) => finding.message).join("; "), 300)}${command}`);
+    const edit = health.some((finding) => finding.remedy === "edit") ? EDIT_HINT : "";
+    lines.push(`\nProgress health: ${boundedContext(health.map((finding) => finding.message).join("; "), 300)}${command}${edit}`);
   }
 
   // Drift is pushed before Resume Snapshot/Next Action/Blockers so the agent
@@ -615,7 +616,7 @@ export async function handleStop(event: HookEvent, options: HandleStopOptions = 
       ];
       if (problems.length > 0) {
         const command = health.some((finding) => finding.remedy === "compact") ? compactCommand(cwd) : undefined;
-        warnings.push(summarizeProblems(problems, command));
+        warnings.push(summarizeProblems(problems, command, health.some((finding) => finding.remedy === "edit")));
         if (event.session_id) {
           await writeSessionState(event.session_id, { ...(await readSessionState(event.session_id)), healthShown: true });
         }

@@ -54,10 +54,14 @@ export async function validateProgressFile(progressPath: string): Promise<string
   return errors;
 }
 
-export function summarizeProblems(problems: string[], command: string | undefined, limit = 3): string {
+// `compact` cannot shorten live sections, so the "edit" remedy needs an agent prompt.
+export const EDIT_HINT =
+  ' To fix, ask the agent: "Shorten the oversized files in project-progress/ to their budget: keep Progress.md to current state (Resume Snapshot, Next Action, Blockers) and move older detail into Session Log.md."';
+
+export function summarizeProblems(problems: string[], command: string | undefined, needsEdit = false, limit = 3): string {
   const more = problems.length - limit;
   const listed = `${problems.slice(0, limit).join("; ")}${more > 0 ? ` (+${more} more)` : ""}`;
-  const hint = command ? ` Preview the cleanup with \`${command}\`, then add --write.` : "";
+  const hint = (command ? ` Preview the cleanup with \`${command}\`, then add --write.` : "") + (needsEdit ? EDIT_HINT : "");
   return `Progress file problems: ${listed}.${hint}`;
 }
 
