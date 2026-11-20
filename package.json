@@ -1,6 +1,6 @@
 {
   "name": "@andriilavrekha/breadcrumbs",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Breadcrumbs: resumable project-local Markdown memory for coding agents.",
   "homepage": "https://github.com/AndriiLavrekha/breadcrumbs",
   "repository": {

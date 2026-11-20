@@ -102,7 +102,7 @@ Assert the full installation calls in order:
   ["hermes", ["skills", "list", "--source", "hub"]],
   ["hermes", ["mcp", "list"]],
   ["hermes", ["skills", "install", skillUrl, "--name", "project-progress", "--yes"]],
-  ["hermes", ["mcp", "add", "awesome-progress-tracker", "--command", "npx", "--env", "PROJECT_PROGRESS_ROOTS=C:/one;C:/two", "--args", "-y", PACKAGE_SPEC, "mcp"]]
+  ["hermes", ["mcp", "add", "awesome-progress-tracker", "--command", "npx", "--env", "PROJECT_PROGRESS_ROOTS=C:/one;C:/two", "npm_config_allow_git=all", "--args", "-y", PACKAGE_SPEC, "mcp"]]
 ]
 ```
 

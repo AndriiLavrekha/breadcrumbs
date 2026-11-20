@@ -10,7 +10,7 @@ Breadcrumbs is an open-source plugin by [Andrii Lavrekha (@AndriiLavrekha)](http
 [![Node](https://img.shields.io/badge/node-%3E%3D18-339933?style=flat-square&logo=node.js&logoColor=white)](#choose-your-path)
 [![TypeScript](https://img.shields.io/badge/-typescript-3178C6?style=flat-square&logo=typescript&logoColor=white)](#mcp-server)
 [![Plugins](https://img.shields.io/badge/plugins-Claude%20Code%20%C2%B7%20Codex-8A2BE2?style=flat-square)](#choose-your-path)
-[![Version](https://img.shields.io/badge/version-0.8.0-informational?style=flat-square)](https://github.com/AndriiLavrekha/breadcrumbs/releases/tag/v0.8.0)
+[![Version](https://img.shields.io/badge/version-0.8.1-informational?style=flat-square)](https://github.com/AndriiLavrekha/breadcrumbs/releases/tag/v0.8.1)
 
 [Why](#why) · [Features](#features) · [Quick Start](#choose-your-path) · [MCP Tools](#mcp-server) · [Troubleshooting](#troubleshooting-codex)
 
@@ -163,9 +163,11 @@ npx --package=github:AndriiLavrekha/breadcrumbs breadcrumbs install -g hermes
 | Piece | What it does |
 | --- | --- |
 | **Skill** `breadcrumbs` | Installed from the tagged raw GitHub `SKILL.md` |
-| **MCP server** `breadcrumbs` | Added via `hermes mcp add ...` with `PROJECT_PROGRESS_ROOTS` |
+| **MCP server** `breadcrumbs` | Added via `hermes mcp add ...` with `PROJECT_PROGRESS_ROOTS` and `npm_config_allow_git=all` |
 | **Doctor** | Checks Hermes CLI, skill, MCP presence, and `hermes mcp test breadcrumbs` |
 | **Uninstall** | Removes only the managed skill and MCP server |
+
+The generated `npx github:` MCP configs (Hermes, Codex, and the CLI's Claude JSON) set `npm_config_allow_git=all`, because npm 12+ defaults `allow-git` to `none` and would otherwise fail the server start with `EALLOWGIT`. This applies to that `npx` process only. Installing the published npm package avoids the need for it.
 
 Named collisions stop the install before any changes are made. If Hermes already has a `breadcrumbs` skill or `breadcrumbs` MCP server, remove or rename the existing entry first and rerun the installer.
 
