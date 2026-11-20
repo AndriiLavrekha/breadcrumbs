@@ -1,0 +1,3 @@
+# Store and check out text as LF on every platform, so builds on Windows emit the same dist/ as CI.
+* text=auto eol=lf
+*.bundle binary
