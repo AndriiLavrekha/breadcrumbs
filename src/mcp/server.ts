@@ -187,6 +187,10 @@ function dedupeByProgressPath(projects: ProjectSummary[]): ProjectSummary[] {
 // tried directly on disk. Unlike root scanning (which stays opt-in via PROJECT_PROGRESS_ROOTS
 // so an unconfigured server never silently reads the launch cwd), this only ever touches the
 // exact path the caller typed — it can't surface anything the caller didn't already name.
+function looksLikePath(selector: string): boolean {
+  return path.isAbsolute(selector) || /[\\/]/.test(selector) || selector === "." || selector === "..";
+}
+
 async function resolveLiteralProgressPath(selector: string): Promise<string | undefined> {
   const base = path.resolve(selector);
   const candidates = [
@@ -216,7 +220,9 @@ export async function resolveProject(selector: string): Promise<ProjectResolutio
   // Checkouts outside PROJECT_PROGRESS_ROOTS (a fresh clone, a benchmark fixture, a temp
   // worktree) are invisible to root scanning by design. If the caller named an exact path to
   // one, honor it directly instead of forcing a re-install just to move Progress.md.
-  if (candidates.length === 0) {
+  // A bare name is a project name: reading it as a folder under the server's cwd would let any
+  // same-named folder there shadow the project the caller meant, so only path-shaped selectors go to disk.
+  if (candidates.length === 0 && looksLikePath(selector)) {
     const literalPath = await resolveLiteralProgressPath(selector);
     if (literalPath) {
       const markdown = await fs.readFile(literalPath, "utf-8");
@@ -573,6 +579,8 @@ export function createServer(): McpServer {
           keys: updates.map(([key]) => key)
         });
       }
+
+      await upsertIndexedProject(parseProjectSummary(updated, match.progressPath));
 
       return jsonResult({
         updated: true,

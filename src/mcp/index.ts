@@ -94,10 +94,13 @@ export async function readProjectIndex(options: ProjectIndexOptions = {}): Promi
   }
 
   // The index is only a cache of what discovery can rebuild, so an unreadable file must not take every tool down.
-  let parsed: ProjectIndex;
+  let parsed: Partial<ProjectIndex> | null;
   try {
-    parsed = JSON.parse(await fs.readFile(filePath, "utf-8")) as ProjectIndex;
+    parsed = JSON.parse(await fs.readFile(filePath, "utf-8")) as Partial<ProjectIndex> | null;
   } catch {
+    parsed = null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return { schemaVersion: 1, updatedAt: "", projects: [] };
   }
   return {

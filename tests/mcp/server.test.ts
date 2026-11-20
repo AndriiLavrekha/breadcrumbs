@@ -600,6 +600,43 @@ describe("MCP server file-backed tools", () => {
     });
   });
 
+  it("set_project_gates refreshes the indexed summary", async () => {
+    const { summary } = await projectOnDisk();
+    await withIndex([summary], async () => {
+      const result = await callTool("set_project_gates", { project: "FileDemo", tests: "done" });
+
+      expect(result.isError).toBe(false);
+      const indexed = (await readProjectIndex()).projects.find((project) => project.project === "FileDemo");
+      expect(indexed?.updated).toBe(today());
+    });
+  });
+
+  it("resolveProject finds a bare name by scanning roots, not as a folder under the server cwd", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "pp-mcp-root-"));
+    const { file } = await projectOnDisk(root);
+    // A same-named folder in the server's working directory must not shadow the project the caller named.
+    const decoy = await fs.mkdtemp(path.join(process.cwd(), "pp-decoy-"));
+    try {
+      await fs.mkdir(path.join(decoy, "project-progress"), { recursive: true });
+      await fs.writeFile(
+        path.join(decoy, "project-progress", "Progress.md"),
+        (await fs.readFile(file, "utf-8")).replace("project: FileDemo", `project: ${path.basename(decoy)}`),
+        "utf-8"
+      );
+      await fs.writeFile(file, (await fs.readFile(file, "utf-8")).replace("project: FileDemo", `project: ${path.basename(decoy)}`), "utf-8");
+      await withIndex([], async () => {
+        process.env.PROJECT_PROGRESS_ROOTS = root;
+
+        const resolution = await resolveProject(path.basename(decoy));
+
+        expect(resolution.error).toBeUndefined();
+        expect(resolution.project?.progressPath).toBe(file);
+      });
+    } finally {
+      await fs.rm(decoy, { recursive: true, force: true });
+    }
+  });
+
   it("resolveProject saves projects found by scanning roots", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "pp-mcp-root-"));
     const { summary } = await projectOnDisk(root);

@@ -115,6 +115,16 @@ describe("project index file safety", () => {
     expect(index.projects).toEqual([]);
   });
 
+  it.each(["null", "42", '"text"', "[]"])("returns an empty index when projects.json holds %s", async (content) => {
+    const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-index-shape-"));
+    await fs.mkdir(path.dirname(indexJsonPath(homeDir)), { recursive: true });
+    await fs.writeFile(indexJsonPath(homeDir), content, "utf-8");
+
+    const index = await readProjectIndex({ homeDir });
+
+    expect(index).toEqual({ schemaVersion: 1, updatedAt: "", projects: [] });
+  });
+
   it("recovers from a truncated index on the next write and leaves no temp files", async () => {
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "pp-index-recover-"));
     await fs.mkdir(path.dirname(indexJsonPath(homeDir)), { recursive: true });

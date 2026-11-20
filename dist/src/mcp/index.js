@@ -78,6 +78,9 @@ export async function readProjectIndex(options = {}) {
         parsed = JSON.parse(await fs.readFile(filePath, "utf-8"));
     }
     catch {
+        parsed = null;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         return { schemaVersion: 1, updatedAt: "", projects: [] };
     }
     return {
