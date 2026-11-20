@@ -12,6 +12,7 @@ import { defaultGitRunner as git, readCheckpoint, resolveDrift } from "./checkpo
 import { renderDrift, renderGates } from "./checkpoint-render.js";
 import { checkFreshness } from "./freshness.js";
 import { analyzeGitCommand } from "./git-command.js";
+import { CLEAN_TREE, committedSince, headReflogSize, treeFingerprint } from "./work-evidence.js";
 import { checkProgressHealth, summarizeProblems, validateProgressFile } from "./validator.js";
 async function initializationGuidance(cwd, hookEventName) {
     const progressPath = progressPathFor(cwd);
@@ -84,19 +85,21 @@ async function pruneSessionState(now = Date.now()) {
 function currentHead(cwd) {
     return git(cwd, ["rev-parse", "HEAD"])?.trim() || undefined;
 }
-async function readHandoff(progressPath) {
+// A Progress.md without a handoff key (a fresh init) counts as clean.
+async function readHandoffFields(progressPath) {
     try {
-        const value = parseFrontmatter(await fs.readFile(progressPath, "utf-8")).handoff;
-        return typeof value === "string" ? value : undefined;
+        const frontmatter = parseFrontmatter(await fs.readFile(progressPath, "utf-8"));
+        const sessionId = frontmatter.session_id ? String(frontmatter.session_id) : undefined;
+        return { handoff: typeof frontmatter.handoff === "string" ? frontmatter.handoff : "clean", sessionId };
     }
     catch {
-        return undefined;
+        return { handoff: "clean" };
     }
 }
 // Returns false when this start only repeats one already recorded: Claude Code re-runs SessionStart after
 // compaction (source "compact"), and that must not reset the baseline Stop compares Progress.md against.
 // Docs do not say whether session_id survives compaction; a new id simply gets a fresh baseline.
-async function recordSessionStart(sessionId, cwd, source, handoffAtStart) {
+async function recordSessionStart(sessionId, cwd, source, atStart) {
     if (!sessionId)
         return true;
     try {
@@ -109,7 +112,10 @@ async function recordSessionStart(sessionId, cwd, source, handoffAtStart) {
             startedAt: new Date().toISOString(),
             cwd,
             headAtStart: currentHead(cwd),
-            handoffAtStart
+            reflogBytesAtStart: await headReflogSize(cwd),
+            treeAtStart: await treeFingerprint(cwd),
+            handoffAtStart: atStart.handoff,
+            sessionIdAtStart: atStart.sessionId
         });
     }
     catch {
@@ -201,42 +207,6 @@ async function bestEffortRecordSessionEnd(cwd, progressPath, now = new Date(), p
         return false;
     }
 }
-// A porcelain line is "XY path", or "XY orig -> path" for a rename. The two
-// status columns are fixed-width, so the path starts at index 2.
-//
-// Returns a normalized classification KEY for a porcelain line, not a usable
-// filesystem path. Git quotes and octal-escapes paths containing non-ASCII or
-// special bytes; this deliberately does not unescape them, because the only
-// consumer is an ASCII prefix test that is unaffected by escaped tails. Do not
-// use this value to open a file.
-function porcelainPathKey(line) {
-    const rest = line.slice(2).trim();
-    const arrow = rest.indexOf(" -> ");
-    const target = arrow === -1 ? rest : rest.slice(arrow + 4);
-    const unquoted = target.replace(/^"|"$/g, "");
-    // Only normalize separators on unquoted paths. A quoted path may contain
-    // backslash escape sequences that are not separators.
-    return unquoted === target ? unquoted.replace(/\\/g, "/") : unquoted;
-}
-function isProgressPath(line) {
-    const target = porcelainPathKey(line);
-    return target.startsWith("project-progress/") || target.includes("/project-progress/");
-}
-// SessionStart and checkpoint stamping now write Progress.md, so a dirty
-// progress folder is no longer evidence that the agent did any work. Only
-// changes elsewhere count.
-function gitHasChanges(cwd) {
-    // --untracked-files=all keeps git from collapsing a wholly-untracked
-    // directory to a single "?? dir/" line, which would hide a nested
-    // project-progress/ folder inside another untracked directory.
-    const out = git(cwd, ["status", "--porcelain", "--untracked-files=all"]);
-    if (out === null)
-        return false;
-    return out
-        .split(/\r?\n/)
-        .filter((line) => line.trim().length > 0)
-        .some((line) => !isProgressPath(line));
-}
 // null means git could not be inspected; callers that guard something must not read that as "nothing staged".
 function stagedFiles(cwd) {
     const out = git(cwd, ["diff", "--cached", "--name-only"]);
@@ -279,7 +249,7 @@ export async function handleSessionStart(event) {
     const cwd = event.cwd ?? process.cwd();
     const progressPath = progressPathFor(cwd);
     await pruneSessionState();
-    const fresh = await recordSessionStart(event.session_id, cwd, event.source, (await readHandoff(progressPath)) ?? "clean");
+    const fresh = await recordSessionStart(event.session_id, cwd, event.source, await readHandoffFields(progressPath));
     if (!(await pathExists(progressPath))) {
         return await initializationGuidance(cwd, "SessionStart");
     }
@@ -468,7 +438,10 @@ async function bestEffortRestoreHandoff(progressPath, state, sessionId) {
             return;
         if (state.handoffAtStart === "interrupted")
             return;
-        await writeFileAtomic(progressPath, replaceFrontmatterValue(markdown, "handoff", state.handoffAtStart), sha256(markdown));
+        let restored = replaceFrontmatterValue(markdown, "handoff", state.handoffAtStart);
+        if (state.sessionIdAtStart)
+            restored = replaceFrontmatterValue(restored, "session_id", state.sessionIdAtStart);
+        await writeFileAtomic(progressPath, restored, sha256(markdown));
     }
     catch {
         // best effort only
@@ -481,14 +454,19 @@ export async function handleStop(event, options = {}) {
     if (!(await pathExists(progressPath)))
         return { code: 0 };
     const sessionState = await readSessionState(event.session_id);
-    // Only nudge when the session did work, so read-only sessions are never nagged. Work is a dirty tree
-    // outside project-progress/ or a HEAD that moved since start (committed work leaves the tree clean). Without
+    // Only nudge when the session did work, so read-only sessions are never nagged. Work is a commit written
+    // since start or an uncommitted tree outside project-progress/ that differs from the one at start. Without
     // git there is no other evidence, so an edited Progress.md body counts there; in a git repo a progress-only
     // edit is deliberately not meaningful work (ADR 0006).
     const head = currentHead(cwd);
-    const headMoved = Boolean(sessionState.headAtStart && head && head !== sessionState.headAtStart);
+    const committed = sessionState.reflogBytesAtStart === undefined
+        ? undefined
+        : await committedSince(cwd, sessionState.reflogBytesAtStart);
+    const madeCommits = committed ?? Boolean(sessionState.headAtStart && head && head !== sessionState.headAtStart);
+    const tree = await treeFingerprint(cwd);
+    const treeChanged = tree !== undefined && tree !== (sessionState.treeAtStart ?? CLEAN_TREE);
     const bodyChanged = !head && (await progressBodyChanged(progressPath, sessionState.bodyHash));
-    if (!gitHasChanges(cwd) && !headMoved && !bodyChanged) {
+    if (!madeCommits && !treeChanged && !bodyChanged) {
         await bestEffortRestoreHandoff(progressPath, sessionState, event.session_id);
         return { code: 0 };
     }
