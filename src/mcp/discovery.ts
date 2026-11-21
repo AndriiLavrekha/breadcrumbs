@@ -11,6 +11,13 @@ export interface DiscoveryConfig {
 
 export const DEFAULT_DISCOVERY_EXCLUDES = [".git", "node_modules", "vendor", ".cache", ".venv", "dist"];
 
+export function rootsFromEnv(value = process.env.PROJECT_PROGRESS_ROOTS): string[] {
+  return (value ?? "")
+    .split(";")
+    .map((root) => root.trim())
+    .filter((root) => root.length > 0);
+}
+
 export interface DiscoveryDiagnostics {
   skippedRoots: string[];
   unreadableDirectories: string[];

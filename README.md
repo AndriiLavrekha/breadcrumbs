@@ -84,7 +84,7 @@ What you get (restart the session to load it):
 | **`PreToolUse` hook** | Blocks `git commit` on progress marked `commit_progress: false` or `sensitivity: sensitive` |
 | **`Stop` hook** | Reminds you to update progress (and flags secrets) when the tree changed but `Progress.md` didn't |
 
-To scope the MCP index to specific roots, set `PROJECT_PROGRESS_ROOTS` (semicolon-separated) in the environment Claude Code runs in.
+To have the MCP index discover projects, set `PROJECT_PROGRESS_ROOTS` (semicolon-separated) in the environment Claude Code runs in. The plugin sets none, so by default `list_projects` only shows projects that were initialized, opened by exact path, or had a session started in them (the SessionStart hook adds them); `list_projects` and `refresh_projects` say so in a `hint` field, and `breadcrumbs doctor` has a `roots` check. Roots are read when the MCP server starts, so **restart the Claude Code session after changing them** (`refresh_projects` rescans the roots the running server already has).
 
 > Ships prebuilt `dist/`, so it runs straight from the cloned repo with no build step.
 
@@ -314,8 +314,8 @@ MCP clients installed from npm/GitHub should use the package binary (`breadcrumb
 
 | Tool | What it does |
 | --- | --- |
-| `list_projects` | List compact summaries from the cached index; optional `status` filter |
-| `refresh_projects` | Rescan `PROJECT_PROGRESS_ROOTS` and update the index |
+| `list_projects` | List compact summaries from the cached index; optional `status` filter. Returns `rootsConfigured` and a `hint` when roots are unset or indexed projects fall outside them |
+| `refresh_projects` | Rescan `PROJECT_PROGRESS_ROOTS` (as read at server start) and update the index; same `rootsConfigured` / `hint` fields |
 | `read_project_progress` | Read one project's compact progress summary |
 | `update_project_progress` | Replace or append a named section in a project's `Progress.md` |
 | `mark_project_status` | Update frontmatter `status` and `last_milestone` |

@@ -932,6 +932,7 @@ describe("npm CLI", () => {
       "mcp",
       "mcp-connection",
       "index",
+      "roots",
       "project"
     ]);
     expect(doctor.checks.every((check) => check.ok)).toBe(true);
@@ -1202,6 +1203,53 @@ describe("npm CLI", () => {
     await initProject({ cwd: tmp, projectName: "Demo Project" });
 
     await expect(initProject({ cwd: tmp, projectName: "Demo Project" })).rejects.toThrow(/already exists/);
+  });
+});
+
+describe("doctor roots check", () => {
+  const runner = async () => ({ stdout: "NAME STATUS\n", stderr: "" });
+
+  async function rootsCheck(roots: string | undefined, project: string) {
+    const previous = process.env.PROJECT_PROGRESS_ROOTS;
+    if (roots === undefined) delete process.env.PROJECT_PROGRESS_ROOTS;
+    else process.env.PROJECT_PROGRESS_ROOTS = roots;
+    try {
+      const result = await runDoctor({ agent: "hermes", cwd: project, commandRunner: runner });
+      return result.checks.find((check) => check.name === "roots")!;
+    } finally {
+      if (previous === undefined) delete process.env.PROJECT_PROGRESS_ROOTS;
+      else process.env.PROJECT_PROGRESS_ROOTS = previous;
+    }
+  }
+
+  async function initializedProject() {
+    const project = await fs.mkdtemp(path.join(os.tmpdir(), "breadcrumbs-doctor-roots-"));
+    await fs.mkdir(path.join(project, "project-progress"));
+    await fs.writeFile(path.join(project, "project-progress", "Progress.md"), "x", "utf-8");
+    return project;
+  }
+
+  it("warns without failing when no roots are set", async () => {
+    const check = await rootsCheck(undefined, await initializedProject());
+
+    expect(check.ok).toBe(true);
+    expect(check.message).toContain("warning: PROJECT_PROGRESS_ROOTS is not set");
+    expect(check.message).toContain("restart");
+  });
+
+  it("warns when the current project is outside the roots", async () => {
+    const check = await rootsCheck("C:/elsewhere", await initializedProject());
+
+    expect(check.ok).toBe(true);
+    expect(check.message).toContain("warning: PROJECT_PROGRESS_ROOTS=C:/elsewhere");
+    expect(check.message).toContain("outside them");
+  });
+
+  it("reports the roots without a warning when the project is covered", async () => {
+    const project = await initializedProject();
+    const check = await rootsCheck(path.dirname(project), project);
+
+    expect(check.message).toBe(`PROJECT_PROGRESS_ROOTS=${path.dirname(project)}`);
   });
 });
 

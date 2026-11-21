@@ -6,7 +6,8 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { parseProjectSummary } from "./mcp/markdown.js";
 import { pathExists } from "./fs-util.js";
-import { indexDir, upsertIndexedProject } from "./mcp/index.js";
+import { rootsFromEnv } from "./mcp/discovery.js";
+import { indexDir, isUnderRoots, upsertIndexedProject } from "./mcp/index.js";
 import { main as runMcpServer } from "./mcp/server.js";
 import { sha256 } from "./hash.js";
 import { planCompaction, readProgressFiles, applyArchive } from "./compact.js";
@@ -623,6 +624,30 @@ async function checkIndexWritable(homeDir) {
         return { name: "index", ok: false, message: `${dir} is not writable` };
     }
 }
+// Reports this environment's roots only: the MCP server reads its own launch environment, which doctor cannot see.
+// Never fails the doctor run, because exact-path reads work without roots.
+function checkRoots(progressPath, projectInitialized) {
+    const roots = rootsFromEnv();
+    if (roots.length === 0) {
+        return {
+            name: "roots",
+            ok: true,
+            message: "warning: PROJECT_PROGRESS_ROOTS is not set in this environment. If the MCP server has none either (Claude plugin installs set none), " +
+                "list_projects only shows projects that were initialized, opened by exact path, or had a session started in them. " +
+                "Set it (semicolon-separated) where the agent launches, then restart the session."
+        };
+    }
+    const list = roots.join(";");
+    if (projectInitialized && !isUnderRoots(progressPath, roots)) {
+        return {
+            name: "roots",
+            ok: true,
+            message: `warning: PROJECT_PROGRESS_ROOTS=${list}, but this project (${progressPath}) is outside them, so refresh_projects will not discover it. ` +
+                "Add its parent folder, then restart the session."
+        };
+    }
+    return { name: "roots", ok: true, message: `PROJECT_PROGRESS_ROOTS=${list}` };
+}
 export async function runDoctor(options = {}) {
     const agent = options.agent ?? "claude";
     const homeDir = options.homeDir ?? process.env.HOME ?? process.env.USERPROFILE;
@@ -703,6 +728,7 @@ export async function runDoctor(options = {}) {
             { name: "mcp", ok: mcpConfigured, message: mcpMessage },
             { name: "mcp-connection", ok: mcpConnectionOk, message: mcpConnectionMessage },
             await checkIndexWritable(options.homeDir),
+            checkRoots(projectPath, await pathExists(projectPath)),
             {
                 name: "project",
                 ok: true,
@@ -731,6 +757,7 @@ export async function runDoctor(options = {}) {
             message: status.mcpConfigured ? "MCP config is installed" : "MCP config is missing"
         },
         await checkIndexWritable(options.homeDir),
+        checkRoots(status.files.projectProgress, status.projectInitialized),
         {
             name: "project",
             ok: true,

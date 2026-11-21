@@ -139,7 +139,9 @@ describe("MCP server tools", () => {
         truncated: false,
         indexUpdatedAt: "",
         indexAgeMs: null,
-        refreshRecommended: true
+        refreshRecommended: true,
+        rootsConfigured: [],
+        hint: expect.stringContaining("PROJECT_PROGRESS_ROOTS is not set")
       });
     } finally {
       if (previousHome === undefined) {
@@ -172,8 +174,44 @@ describe("MCP server tools", () => {
           truncated: false,
           indexUpdatedAt: "2026-06-27T00:00:00Z",
           indexAgeMs: expect.any(Number),
-          refreshRecommended: true
+          refreshRecommended: true,
+          rootsConfigured: [],
+          hint: expect.stringContaining("PROJECT_PROGRESS_ROOTS is not set")
         });
+      }
+    );
+  });
+
+  it("tells the caller to restart the session after changing roots when none are set", async () => {
+    await withIndex([], async () => {
+      const list = JSON.parse(await projectsJson());
+      const refresh = JSON.parse(await refreshProjectsJson());
+      for (const result of [list, refresh]) {
+        expect(result.rootsConfigured).toEqual([]);
+        expect(result.hint).toContain("exact path");
+        expect(result.hint).toContain("restart");
+      }
+    });
+  });
+
+  it("names indexed projects outside the configured roots and stays quiet when all are covered", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "project-progress-roots-"));
+    const inside = path.join(root, "inside", "project-progress", "Progress.md");
+    await withIndex(
+      [
+        indexSummary({ project: "Inside", progressPath: inside, path: path.dirname(path.dirname(inside)) }),
+        indexSummary({ project: "Outside", progressPath: "C:/elsewhere/project-progress/Progress.md", path: "C:/elsewhere" })
+      ],
+      async () => {
+        process.env.PROJECT_PROGRESS_ROOTS = root;
+        const list = JSON.parse(await projectsJson());
+        expect(list.rootsConfigured).toEqual([root]);
+        expect(list.hint).toContain("1 indexed project(s) are outside PROJECT_PROGRESS_ROOTS");
+        expect(list.hint).toContain("C:/elsewhere/project-progress/Progress.md");
+        expect(list.hint).not.toContain(inside);
+
+        process.env.PROJECT_PROGRESS_ROOTS = "C:/elsewhere;" + root;
+        expect(JSON.parse(await projectsJson()).hint).toBeUndefined();
       }
     );
   });

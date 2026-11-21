@@ -3,8 +3,8 @@ import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
-import { DEFAULT_DISCOVERY_EXCLUDES, discoverProjects } from "./discovery.js";
-import { readProjectIndex, refreshProjectIndex, upsertIndexedProject } from "./index.js";
+import { DEFAULT_DISCOVERY_EXCLUDES, discoverProjects, rootsFromEnv } from "./discovery.js";
+import { readProjectIndex, refreshProjectIndex, rootsHint, upsertIndexedProject } from "./index.js";
 import { extractSection, parseFrontmatter, parseProjectSummary } from "./markdown.js";
 import { sha256 } from "../hash.js";
 import path from "node:path";
@@ -35,6 +35,7 @@ export function gateFrontmatterUpdates(gates) {
     }
     return updates;
 }
+export { rootsFromEnv };
 export const toolDefinitions = [
     { name: "list_projects" },
     { name: "refresh_projects" },
@@ -43,12 +44,6 @@ export const toolDefinitions = [
     { name: "mark_project_status" },
     { name: "set_project_gates" }
 ];
-export function rootsFromEnv(value = process.env.PROJECT_PROGRESS_ROOTS) {
-    return (value ?? "")
-        .split(";")
-        .map((root) => root.trim())
-        .filter((root) => root.length > 0);
-}
 function truncateString(value, maxLength) {
     if (value.length <= maxLength)
         return value;
@@ -90,6 +85,7 @@ export function compactProjectListItem(project) {
 export async function projectsJson(filter) {
     const index = await readProjectIndex();
     const projects = index.projects;
+    const roots = rootsFromEnv();
     const filtered = filter ? projects.filter((project) => filter(project.status)) : projects;
     const items = filtered.slice(0, DEFAULT_MAX_PROJECTS).map(compactProjectListItem);
     const indexedAt = Date.parse(index.updatedAt);
@@ -101,7 +97,9 @@ export async function projectsJson(filter) {
         truncated: items.length < filtered.length,
         indexUpdatedAt: index.updatedAt,
         indexAgeMs,
-        refreshRecommended: indexAgeMs === null || indexAgeMs > DEFAULT_MAX_INDEX_AGE_MS
+        refreshRecommended: indexAgeMs === null || indexAgeMs > DEFAULT_MAX_INDEX_AGE_MS,
+        rootsConfigured: roots,
+        hint: rootsHint(roots, projects)
     };
     return JSON.stringify(result);
 }
@@ -196,11 +194,14 @@ export async function resolveProject(selector) {
     return { project: candidates[0] };
 }
 export async function refreshProjectsJson() {
-    const index = await refreshProjectIndex(rootsFromEnv(), DEFAULT_EXCLUDES);
+    const roots = rootsFromEnv();
+    const index = await refreshProjectIndex(roots, DEFAULT_EXCLUDES);
     return JSON.stringify({
         refreshed: true,
         updatedAt: index.updatedAt,
-        total: index.projects.length
+        total: index.projects.length,
+        rootsConfigured: roots,
+        hint: rootsHint(roots, index.projects)
     });
 }
 export async function projectTrackingStateJson(options = {}) {
@@ -304,7 +305,7 @@ export function createServer() {
         return successResult(JSON.parse(text), text);
     });
     server.registerTool("refresh_projects", {
-        description: "Refresh the project index by scanning PROJECT_PROGRESS_ROOTS for project-progress/Progress.md files."
+        description: "Refresh the project index by scanning PROJECT_PROGRESS_ROOTS for project-progress/Progress.md files. Only folders under those roots are scanned; the result's hint explains an empty or partial index. Roots are read at server start, so changing them needs a session restart."
     }, async () => {
         const text = await refreshProjectsJson();
         return successResult(JSON.parse(text), text);

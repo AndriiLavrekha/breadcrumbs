@@ -64,6 +64,27 @@ export function isUnderRoots(targetPath: string, roots: string[]): boolean {
   });
 }
 
+const RESTART_NOTE = "Roots are read when the MCP server starts, so restart the agent session after changing PROJECT_PROGRESS_ROOTS.";
+
+// Explains an index that looks empty or partial. Discovery only scans PROJECT_PROGRESS_ROOTS, so
+// without this a user cannot tell "no such project" from "project outside the roots".
+export function rootsHint(roots: string[], projects: ProjectSummary[]): string | undefined {
+  if (roots.length === 0) {
+    return (
+      "PROJECT_PROGRESS_ROOTS is not set, so this index only holds projects that were initialized, opened by exact path, or had a session started in them " +
+      "(pass a project folder to read_project_progress to add one). To discover projects automatically, set " +
+      `PROJECT_PROGRESS_ROOTS (semicolon-separated) in the MCP server's environment. ${RESTART_NOTE}`
+    );
+  }
+  const outside = projects.filter((project) => !isUnderRoots(project.progressPath, roots));
+  if (outside.length === 0) return undefined;
+  const shown = outside.slice(0, 5).map((project) => project.progressPath).join(", ");
+  return (
+    `${outside.length} indexed project(s) are outside PROJECT_PROGRESS_ROOTS and will not be rediscovered by refresh_projects: ` +
+    `${shown}${outside.length > 5 ? ", ..." : ""}. Add their parent folder to PROJECT_PROGRESS_ROOTS to scan them. ${RESTART_NOTE}`
+  );
+}
+
 export function renderProjectsMarkdown(index: ProjectIndex): string {
   const rows = index.projects
     .map((project) => {

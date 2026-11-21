@@ -4,7 +4,8 @@ import path from "node:path";
 import { pathExists } from "../fs-util.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { bodyHash, sha256 } from "../hash.js";
-import { extractSection, isKnownRuntimeValue, parseFrontmatter, renderLastRuntime } from "../mcp/markdown.js";
+import { readProjectIndex, upsertIndexedProject } from "../mcp/index.js";
+import { extractSection, isKnownRuntimeValue, parseFrontmatter, parseProjectSummary, renderLastRuntime } from "../mcp/markdown.js";
 import { replaceFrontmatterValue, writeFileAtomic } from "../mcp/writer.js";
 import { readProjectTrackingState, setProjectTrackingState } from "../project-state.js";
 // defaultGitRunner's implementation lives in checkpoint.ts, not here.
@@ -196,6 +197,18 @@ async function bestEffortSetProjectState(cwd: string, state: "initialized"): Pro
   }
 }
 
+// project-state.json already remembers every project a session has seen; the MCP index is a separate file,
+// so without this a project only shows up in list_projects if PROJECT_PROGRESS_ROOTS happens to cover it.
+// Only add a missing entry: rewriting the shared index on every SessionStart would race concurrent sessions.
+async function bestEffortIndexProject(progressPath: string, markdown: string): Promise<void> {
+  try {
+    if ((await readProjectIndex()).projects.some((project) => project.progressPath === progressPath)) return;
+    await upsertIndexedProject(parseProjectSummary(markdown, progressPath));
+  } catch {
+    // best effort only
+  }
+}
+
 async function bestEffortReadProjectState(cwd: string): Promise<"unknown" | "opted-in" | "opted-out" | "initialized"> {
   try {
     return (await readProjectTrackingState(cwd)).state;
@@ -322,6 +335,7 @@ export async function handleSessionStart(event: HookEvent): Promise<HookResult> 
   await bestEffortSetProjectState(cwd, "initialized");
 
   const markdown = await fs.readFile(progressPath, "utf-8");
+  await bestEffortIndexProject(progressPath, markdown);
   if (fresh) await bestEffortRecordBodyHash(event.session_id, markdown);
   const frontmatter = parseFrontmatter(markdown);
 

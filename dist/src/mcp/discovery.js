@@ -3,6 +3,12 @@ import path from "node:path";
 import { pathExists } from "../fs-util.js";
 import { parseProjectSummary } from "./markdown.js";
 export const DEFAULT_DISCOVERY_EXCLUDES = [".git", "node_modules", "vendor", ".cache", ".venv", "dist"];
+export function rootsFromEnv(value = process.env.PROJECT_PROGRESS_ROOTS) {
+    return (value ?? "")
+        .split(";")
+        .map((root) => root.trim())
+        .filter((root) => root.length > 0);
+}
 async function mapWithConcurrency(items, limit, run) {
     let next = 0;
     const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {

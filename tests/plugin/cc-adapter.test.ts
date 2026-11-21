@@ -7,6 +7,7 @@ import { handlePreCommit, handlePreEdit, handleSessionStart, handleStop, handleU
 import { validateProgressFile } from "../../src/hook/validator.js";
 import { parseFrontmatter } from "../../src/mcp/markdown.js";
 import { replaceFrontmatterValue } from "../../src/mcp/writer.js";
+import { readProjectIndex } from "../../src/mcp/index.js";
 import { readProjectTrackingState, setProjectTrackingState } from "../../src/project-state.js";
 
 async function withTrackerHome(run: (home: string) => Promise<void>): Promise<void> {
@@ -68,6 +69,19 @@ describe("cc-adapter session-start", () => {
     const dir = await makeRepo();
     const file = await writeProgress(dir, progressDoc({}));
     expect(await validateProgressFile(file)).toEqual([]);
+  });
+
+  it("adds a tracked project to the MCP index so it is listed without PROJECT_PROGRESS_ROOTS", async () => {
+    await withTrackerHome(async (home) => {
+      const dir = await makeRepo();
+      const file = await writeProgress(dir, progressDoc({}));
+      expect((await readProjectIndex({ homeDir: home })).projects).toEqual([]);
+
+      await handleSessionStart({ cwd: dir, session_id: `s-${Date.now()}` });
+
+      const indexed = (await readProjectIndex({ homeDir: home })).projects;
+      expect(indexed.map((project) => project.progressPath)).toEqual([file]);
+    });
   });
 
   it("emits initialization guidance when there is no progress file and state is unknown", async () => {

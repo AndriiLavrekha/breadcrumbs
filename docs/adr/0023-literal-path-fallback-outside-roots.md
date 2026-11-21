@@ -49,3 +49,14 @@ instead"); it just didn't work for paths outside the roots before now.
 `refresh_projects` and `list_projects` are unaffected — they still only ever
 see configured roots plus whatever `resolveProject` has upserted into the
 index from a prior literal-path call.
+
+## Addendum: say so when the index is empty or partial
+
+Because roots are opt-in and the Claude plugin sets none, an unconfigured
+server returned an empty list with no explanation, and users concluded their
+project did not exist. `list_projects` and `refresh_projects` now return
+`rootsConfigured` plus a `hint` when roots are unset or indexed projects sit
+outside them, and `doctor` has a non-failing `roots` check. The default is
+unchanged (no implicit scan of the cwd or home): scanning an unconfigured
+location costs a walk and surfaces projects the user never opted in. Roots are
+read at server start, so changing them needs a session restart.
