@@ -82,6 +82,9 @@ export interface StatusResult {
   projectInitialized: boolean;
   bootstrapInstalled: boolean;
   mcpConfigured: boolean;
+  // Claude only: the breadcrumbs plugin is registered and its install directory exists. It provides the
+  // bootstrap (SessionStart hook) and MCP server itself, so no CLI-written files are needed.
+  pluginInstalled?: boolean;
   skillInstalled?: boolean;
   files: Record<string, string>;
 }
@@ -685,6 +688,21 @@ export async function uninstallProjectMcp(cwd = process.cwd()): Promise<Uninstal
   return { agent: "claude", changedFiles };
 }
 
+// Claude Code records plugins in installed_plugins.json; a breadcrumbs entry with a present install path counts.
+async function claudePluginInstalled(homeDir: string): Promise<boolean> {
+  const registry = await readJsonObject(path.join(homeDir, ".claude", "plugins", "installed_plugins.json"));
+  const plugins = registry.plugins;
+  if (!plugins || typeof plugins !== "object" || Array.isArray(plugins)) return false;
+  for (const [key, entries] of Object.entries(plugins)) {
+    if (!key.startsWith("breadcrumbs@") || !Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      const installPath = (entry as { installPath?: unknown })?.installPath;
+      if (typeof installPath === "string" && (await pathExists(installPath))) return true;
+    }
+  }
+  return false;
+}
+
 export async function readStatus(options: StatusOptions = {}): Promise<StatusResult> {
   const agent = options.agent ?? "claude";
   const homeDir = options.homeDir ?? process.env.HOME ?? process.env.USERPROFILE;
@@ -708,6 +726,7 @@ export async function readStatus(options: StatusOptions = {}): Promise<StatusRes
           !Array.isArray(mcpServers) &&
           (MCP_SERVER_NAME in mcpServers || LEGACY_MCP_SERVER_NAME in mcpServers)
       ),
+      pluginInstalled: await claudePluginInstalled(homeDir),
       files: {
         bootstrap: claudeMemory,
         mcpConfig: claudeConfig,
@@ -908,17 +927,27 @@ export async function runDoctor(options: StatusOptions = {}): Promise<DoctorResu
   }
 
   const status = await readStatus(options);
+  // A plugin-only Claude install runs the server with node from the plugin root, so npx is not needed.
+  const pluginOnly = status.pluginInstalled === true && !status.mcpConfigured;
   const checks: DoctorCheck[] = [
-    await checkNpx(),
+    ...(pluginOnly ? [] : [await checkNpx()]),
     {
       name: "bootstrap",
-      ok: status.bootstrapInstalled,
-      message: status.bootstrapInstalled ? "bootstrap instructions are installed" : "bootstrap instructions are missing"
+      ok: status.bootstrapInstalled || status.pluginInstalled === true,
+      message: status.bootstrapInstalled
+        ? "bootstrap instructions are installed"
+        : status.pluginInstalled
+          ? "breadcrumbs plugin is installed (it provides the bootstrap via its SessionStart hook)"
+          : "bootstrap instructions are missing"
     },
     {
       name: "mcp",
-      ok: status.mcpConfigured,
-      message: status.mcpConfigured ? "MCP config is installed" : "MCP config is missing"
+      ok: status.mcpConfigured || status.pluginInstalled === true,
+      message: status.mcpConfigured
+        ? "MCP config is installed"
+        : status.pluginInstalled
+          ? "breadcrumbs plugin is installed (it provides the MCP server)"
+          : "MCP config is missing"
     },
     await checkIndexWritable(options.homeDir),
     checkRoots(status.files.projectProgress, status.projectInitialized),

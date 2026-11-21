@@ -1072,6 +1072,34 @@ describe("npm CLI", () => {
     });
   });
 
+  it("accepts a registered Claude plugin install in place of CLI-written bootstrap and MCP config", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "project-progress-home-"));
+    const installPath = await fs.mkdtemp(path.join(os.tmpdir(), "breadcrumbs-plugin-"));
+    await fs.mkdir(path.join(home, ".claude", "plugins"), { recursive: true });
+    await fs.writeFile(
+      path.join(home, ".claude", "plugins", "installed_plugins.json"),
+      JSON.stringify({ version: 2, plugins: { "breadcrumbs@breadcrumbs": [{ scope: "user", installPath }] } })
+    );
+
+    const doctor = await runDoctor({ agent: "claude", homeDir: home });
+
+    expect(doctor.checks.find((check) => check.name === "bootstrap")).toMatchObject({ ok: true });
+    expect(doctor.checks.find((check) => check.name === "mcp")).toMatchObject({ ok: true });
+    expect(doctor.checks.find((check) => check.name === "npx")).toBeUndefined();
+    expect(await readStatus({ agent: "claude", homeDir: home })).toMatchObject({ pluginInstalled: true, mcpConfigured: false });
+  });
+
+  it("ignores a plugin registry entry whose install directory is gone", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "project-progress-home-"));
+    await fs.mkdir(path.join(home, ".claude", "plugins"), { recursive: true });
+    await fs.writeFile(
+      path.join(home, ".claude", "plugins", "installed_plugins.json"),
+      JSON.stringify({ plugins: { "breadcrumbs@breadcrumbs": [{ installPath: path.join(home, "gone") }] } })
+    );
+
+    expect(await readStatus({ agent: "claude", homeDir: home })).toMatchObject({ pluginInstalled: false });
+  });
+
   it("runs doctor checks for a complete Codex install", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "project-progress-home-"));
     await installAgent({ agent: "codex", homeDir: home, roots: "C:/repo" });
